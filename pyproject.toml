@@ -1,0 +1,20 @@
+[project]
+name = "world-modeling"
+requires-python = ">=3.12"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+dependencies = [
+    "numpy>=2.1.2",
+    "torch>=2.5.0",
+]
+
+[tool.uv]
+dev-dependencies = []
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["I", "W"]
+fixable = ["ALL"]

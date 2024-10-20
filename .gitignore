@@ -1,0 +1,12 @@
+/*
+!.gitignore
+!*.md
+
+*/__pycache__/*
+!src/
+!pyproject.toml
+!uv.lock
+!.python-version
+
+!flake.nix
+!flake.lock
