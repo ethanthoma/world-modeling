@@ -1,15 +1,54 @@
-from typing import List
+import sys
+import time
+from typing import Callable, Iterable, List, Tuple
 
 import torch
+import torch.func as func
 import torch.nn.functional as F
 
 from config import Transformer_Config
 from weights import Transformer_Weights
 
 
-def cross_entropy_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    log_probs = F.log_softmax(logits, dim=-1)
-    return -torch.mean(torch.gather(log_probs, -1, targets.unsqueeze(-1)).squeeze(-1))
+def cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    return F.cross_entropy(logits, targets)
+
+
+def loss(
+    params: Any,
+    x: Any,
+    targets: torch.Tensor,
+    predict: Callable[[Any, Any], torch.Tensor],
+):
+    logits = func.vmap(predict, in_dims=(None, 0))(params, x)
+    return cross_entropy(logits, targets)
+
+
+@torch.jit.script
+def update(
+    params: Any,
+    x: Any,
+    y: torch.Tensor,
+    predict: Callable[[Any, Any], torch.Tensor],
+    step_size: float = 0.01,
+) -> List[Any]:
+    grads = func.grad(loss)(params, x, y, predict)
+    return [
+        (w - step_size * dw, b - step_size * db)
+        for (w, b), (dw, db) in zip(params, grads)
+    ]
+
+
+def train(
+    params: Any, training_generator: Iterable[Tuple[Any, Any]], num_epochs: int = 5
+):
+    for epoch in range(num_epochs):
+        start_time = time.time()
+        for x, y in training_generator:
+            params = update(params, x, y)
+        epoch_time = time.time() - start_time
+
+        print("Epoch {} in {:0.2f} sec".format(epoch, epoch_time))
 
 
 def get_transformer_parameters(weights: Transformer_Weights) -> List[torch.Tensor]:
@@ -32,40 +71,45 @@ def get_transformer_parameters(weights: Transformer_Weights) -> List[torch.Tenso
     return params
 
 
-def training_step(
-    config: Transformer_Config,
-    weights: Transformer_Weights,
-    optimizer: torch.optim.Optimizer,
-    input_data: torch.Tensor,
-    targets: torch.Tensor,
-) -> torch.Tensor:
-    optimizer.zero_grad()
-
-    # Forward pass
-    logits = transformer(config, weights, input_data)
-
-    # Compute loss
-    loss = cross_entropy_loss(logits, targets)
-
-    # Backward pass
-    loss.backward()
-
-    # Update weights
-    optimizer.step()
-
-    return loss
-
-
 def train(
-    config: Transformer_Config,
-    weights: Transformer_Weights,
+    params: Any,
     optimizer: torch.optim.Optimizer,
     data_generator: Callable[[], Tuple[torch.Tensor, torch.Tensor]],
-    num_steps: int,
+    num_epochs: int,
 ):
-    for step in range(num_steps):
-        input_data, targets = data_generator()
-        loss = training_step(config, weights, optimizer, input_data, targets)
+    def spinner_generator():
+        while True:
+            for char in "|/-\\":
+                yield char
 
-        if step % 100 == 0:
-            print(f"Step {step}, Loss: {loss.item():.4f}")
+    spinner = spinner_generator()
+
+    for epoch in range(num_epochs):
+        start_time = time.time()
+        step = None
+
+        for step, (inputs, targets) in enumerate(data_generator()):
+            optimizer.zero_grad()
+
+            logits = transformer(params, inputs)
+
+            loss = cross_entropy_loss(logits, targets)
+
+            loss.backward()
+
+            optimizer.step()
+
+            sys.stdout.write(
+                f"\rEpoch {epoch + 1}/{num_epochs} - Step {step} {next(spinner)}"
+            )
+            sys.stdout.flush()
+
+        epoch_time = time.time() - start_time
+        avg_loss = total_loss / steps
+
+        sys.stdout.write("\r" + " " * (80) + "\r")
+        sys.stdout.flush()
+
+        print(
+            f"Epoch {epoch + 1}/{num_epochs} - Steps: {steps}, Avg Loss: {avg_loss:.4f}, Time: {epoch_time:.2f}s"
+        )

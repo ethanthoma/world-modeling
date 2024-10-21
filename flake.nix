@@ -81,10 +81,10 @@
         });
 
         pylyzer = prev.pylyzer.override {
-          rustPlatform = prev.rustPlatform // {
+          rustPlatform = final.rustPlatform // {
             buildRustPackage =
               args:
-              prev.rustPlatform.buildRustPackage (
+              final.rustPlatform.buildRustPackage (
                 args
                 // rec {
                   version = "0.0.68";
