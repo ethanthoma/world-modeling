@@ -76,6 +76,7 @@ def train(
     optimizer: torch.optim.Optimizer,
     data_generator: Callable[[], Tuple[torch.Tensor, torch.Tensor]],
     num_epochs: int,
+    model: Callable[[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]],
 ):
     def spinner_generator():
         while True:
@@ -91,9 +92,7 @@ def train(
         for step, (inputs, targets) in enumerate(data_generator()):
             optimizer.zero_grad()
 
-            logits = transformer(params, inputs)
-
-            loss = cross_entropy_loss(logits, targets)
+            loss = loss(params, inputs, targets, transformer)
 
             loss.backward()
 
