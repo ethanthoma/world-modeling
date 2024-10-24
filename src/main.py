@@ -1,3 +1,4 @@
+import functools
 import itertools
 import pathlib
 
@@ -12,6 +13,7 @@ import weights
 
 BATCH_SIZE = 32
 BERT_BASE_PATH = pathlib.Path("./weights/bert.bin")
+TRAIN_DATA_PATH = pathlib.Path("./data/jericho-world/train.json")
 
 
 def main():
@@ -20,8 +22,10 @@ def main():
     bert_params = weights.load_bert_weights(BERT_BASE_PATH, config.BERT_BASE_CONFIG)
 
     batched_generator = itertools.batched(
-        data.data_generator("data/jericho-world/train.json"), BATCH_SIZE
+        data.data_generator(TRAIN_DATA_PATH),
+        BATCH_SIZE,
     )
 
-    for sample in batched_generator:
+    for batch in batched_generator:
+        print(batch)
         break
