@@ -11,7 +11,7 @@ import config
 import data
 import weights
 
-BATCH_SIZE = 32
+BATCH_SIZE = 2
 BERT_BASE_PATH = pathlib.Path("./weights/bert.bin")
 TRAIN_DATA_PATH = pathlib.Path("./data/jericho-world/train.json")
 
@@ -27,5 +27,5 @@ def main():
     )
 
     for batch in batched_generator:
-        print(batch)
+        print(batch[0])
         break

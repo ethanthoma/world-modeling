@@ -1,5 +1,15 @@
 import json
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, TypedDict
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    NamedTuple,
+    Optional,
+    Set,
+    Tuple,
+    TypedDict,
+)
 
 
 class LocationDict(TypedDict):
@@ -32,38 +42,45 @@ class JerichoSample(TypedDict):
     reward: int
 
 
+class Input(NamedTuple):
+    textual_observations: str
+    valid_actions: Set[Tuple[str, str]]
+    graph: Set[Tuple[str, str, str]]
+
+
+class Target(NamedTuple):
+    valid_actions_next: Set[Tuple[str, str]]
+    graph_additions: Set[Tuple[str, str, str]]
+
+
 def data_generator(
     filepath: str, chunk_size: int = 4096
 ) -> Iterable[Tuple[str, str, str]]:
     return map(preprocess, json_generator(filepath=filepath, chunk_size=chunk_size))
 
 
-def preprocess(sample: JerichoSample) -> Tuple[str, str, str]:
-    observation = sample["state"]["obs"]
-    valid_actions = list(sample["state"]["valid_acts"].values())
-    current_graph = sample["state"]["graph"]
-    next_graph_diff = sample["graph_diff"]
-    next_valid_actions = list(sample["next_state"]["valid_acts"].values())
-
-    input_sequence = f"[OBS] {observation} [ACT] {' [ACT] '.join(valid_actions)} [GRAPH] {' '.join([' '.join(triple) for triple in current_graph])}"
-
-    graph_target = (
-        f"[GRAPH] {' '.join([' '.join(triple) for triple in next_graph_diff])}"
+def preprocess(sample: JerichoSample) -> Tuple[Input, str]:
+    X = Input(
+        textual_observations=sample["state"]["obs"],
+        valid_actions={(k, v) for k, v in sample["state"]["valid_acts"].items()},
+        graph={(s, r, o) for s, r, o in sample["state"]["graph"]},
     )
-    action_target = f"[ACT] {' [ACT] '.join(next_valid_actions)}"
 
-    return input_sequence, graph_target, action_target
+    y = Target(
+        valid_actions_next={
+            (k, v) for k, v in sample["next_state"]["valid_acts"].items()
+        },
+        graph_additions=knowledge_graph_additions(sample),
+    )
+
+    return X, y
 
 
-def encode_text(obs: str, valid_actions: Dict[str, str]):
-    return obs + " [SEP] " + " [ACT] ".join(valid_actions.keys())
+def knowledge_graph_additions(sample: JerichoSample) -> Set[Tuple[str, str, str]]:
+    current_graph = {(s, r, o) for s, r, o in sample["state"]["graph"]}
+    next_graph = {(s, r, o) for s, r, o in sample["next_state"]["graph"]}
 
-
-def encode_graph(graph: List[Tuple[str, str, str]], max_graph_length: int = 1024):
-    encoded = []
-    for s, r, o in graph:
-        if len(encoded) >= max_graph_length:
-            break
+    return next_graph - current_graph
 
 
 def json_generator(filepath: str, chunk_size: int) -> Iterable[JerichoSample]:
@@ -85,7 +102,7 @@ def json_generator(filepath: str, chunk_size: int) -> Iterable[JerichoSample]:
                 buffer += chunk
 
 
-REQUIRED_KEYS = {k for k in data.JerichoSample.__annotations__}
+REQUIRED_KEYS = {k for k in JerichoSample.__annotations__}
 
 
 def find_complete_json(buffer: str) -> Tuple[Optional[str], str]:
