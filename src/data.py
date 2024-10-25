@@ -1,15 +1,5 @@
 import json
-from typing import (
-    Any,
-    Dict,
-    Iterable,
-    List,
-    NamedTuple,
-    Optional,
-    Set,
-    Tuple,
-    TypedDict,
-)
+from typing import Dict, Iterable, List, Optional, Tuple, TypedDict
 
 
 class LocationDict(TypedDict):
@@ -42,48 +32,7 @@ class JerichoSample(TypedDict):
     reward: int
 
 
-class Input(NamedTuple):
-    textual_observations: str
-    valid_actions: Set[Tuple[str, str]]
-    graph: Set[Tuple[str, str, str]]
-
-
-class Target(NamedTuple):
-    valid_actions_next: Set[Tuple[str, str]]
-    graph_additions: Set[Tuple[str, str, str]]
-
-
-def data_generator(
-    filepath: str, chunk_size: int = 4096
-) -> Iterable[Tuple[str, str, str]]:
-    return map(preprocess, json_generator(filepath=filepath, chunk_size=chunk_size))
-
-
-def preprocess(sample: JerichoSample) -> Tuple[Input, str]:
-    X = Input(
-        textual_observations=sample["state"]["obs"],
-        valid_actions={(k, v) for k, v in sample["state"]["valid_acts"].items()},
-        graph={(s, r, o) for s, r, o in sample["state"]["graph"]},
-    )
-
-    y = Target(
-        valid_actions_next={
-            (k, v) for k, v in sample["next_state"]["valid_acts"].items()
-        },
-        graph_additions=knowledge_graph_additions(sample),
-    )
-
-    return X, y
-
-
-def knowledge_graph_additions(sample: JerichoSample) -> Set[Tuple[str, str, str]]:
-    current_graph = {(s, r, o) for s, r, o in sample["state"]["graph"]}
-    next_graph = {(s, r, o) for s, r, o in sample["next_state"]["graph"]}
-
-    return next_graph - current_graph
-
-
-def json_generator(filepath: str, chunk_size: int) -> Iterable[JerichoSample]:
+def data(filepath: str, chunk_size: int = 4096) -> Iterable[JerichoSample]:
     with open(filepath, "r") as f:
         buffer = ""
         chunk = f.read(2)

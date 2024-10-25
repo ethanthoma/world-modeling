@@ -1,24 +1,23 @@
+from typing import Dict, Tuple
+
 import torch
+import transformers
 
 
-def tokenizer():
-    return transformers.BertTokenizer.from_pretrained("bert-base-uncased")
+def tokenize(
+    textual_encoder_input: str,
+    graph_encoder_input: str,
+    bert_tokenizer: transformers.BertTokenizer = transformers.BertTokenizer.from_pretrained(
+        "bert-base-uncased"
+    ),
+    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+) -> Tuple[Dict[str, torch.Tensor]]:
+    textual_encodings = bert_tokenizer(
+        textual_encoder_input, padding=True, truncation=True, return_tensors="pt"
+    ).to(device)
 
+    graph_encodings = bert_tokenizer(
+        graph_encoder_input, padding=True, truncation=True, return_tensors="pt"
+    ).to(device)
 
-def prepare_inputs(
-    text: str, max_length: int = 512, device: str = "cpu"
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    t = tokenizer()
-
-    inputs = t(
-        text,
-        max_length=max_length,
-        truncation=True,
-        return_tensors="pt",
-    )
-
-    input_ids = inputs["input_ids"].to(device)
-    attention_mask = inputs["attention_mask"].to(device)
-    token_type_ids = inputs["token_type_ids"].to(device)
-
-    return input_ids, attention_mask, token_type_ids
+    return textual_encodings, graph_encodings

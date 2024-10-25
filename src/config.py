@@ -14,12 +14,23 @@ class BERT_Config(NamedTuple):
     vocab_size: int
 
 
-BERT_BASE_CONFIG = BERT_Config(
+BERT_CONFIG = BERT_Config(
     hidden_size=768,
-    num_hidden_layers=12,
-    num_attention_heads=12,
+    num_hidden_layers=6,
+    num_attention_heads=6,
     intermediate_size=3072,
-    max_position_embeddings=512,
+    max_position_embeddings=1024,
     type_vocab_size=2,
     vocab_size=30522,
+)
+
+
+class GPT2_Config(NamedTuple):
+    num_hidden_layers: int
+    num_attention_heads: int
+
+
+GPT2_CONFIG = GPT2_Config(
+    num_hidden_layers=6,
+    num_attention_heads=6,
 )

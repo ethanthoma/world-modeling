@@ -3,29 +3,34 @@ import itertools
 import pathlib
 
 import torch
-import torch.func as func
-import torch.jit as jrt
-import transformers
 
 import config
 import data
+import preprocess
+import tokenizer
 import weights
 
-BATCH_SIZE = 2
-BERT_BASE_PATH = pathlib.Path("./weights/bert.bin")
+BATCH_SIZE = 1
+BERT_PATH = pathlib.Path("./weights/bert.bin")
+GPT2_PATH = pathlib.Path("./weights/gpt2.bin")
 TRAIN_DATA_PATH = pathlib.Path("./data/jericho-world/train.json")
 
 
 def main():
-    tokenizer = transformers.BertTokenizer.from_pretrained("bert-base-uncased")
+    # ** Model **
+    bert_params = weights.load_bert_weights(BERT_PATH, config.BERT_CONFIG)
 
-    bert_params = weights.load_bert_weights(BERT_BASE_PATH, config.BERT_BASE_CONFIG)
+    gpt2_params = weights.load_gpt2_weights(GPT2_PATH, config.GPT2_CONFIG)
 
-    batched_generator = itertools.batched(
-        data.data_generator(TRAIN_DATA_PATH),
-        BATCH_SIZE,
+    # ** Data **
+    raw_data = data.data(TRAIN_DATA_PATH)
+    preprocessed_data = map(preprocess.preprocess, raw_data)
+
+    batched_data = itertools.starmap(
+        zip, itertools.batched(preprocessed_data, BATCH_SIZE)
     )
 
-    for batch in batched_generator:
-        print(batch[0])
-        break
+    for X, y in batched_data:
+        tokens = itertools.starmap(tokenizer.tokenize, X)
+
+        return
