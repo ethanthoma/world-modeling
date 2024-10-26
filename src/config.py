@@ -21,11 +21,13 @@ BERT_CONFIG = BERT_Config(
 class GPT2_Config(NamedTuple):
     num_hidden_layers: int
     num_attention_heads: int
+    vocab_size: int
 
 
 GPT2_CONFIG = GPT2_Config(
     num_hidden_layers=6,
     num_attention_heads=6,
+    vocab_size=50257,
 )
 
 

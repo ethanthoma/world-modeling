@@ -6,6 +6,7 @@ import torch
 import torch.nn.init as init
 
 import config
+import tokenizer
 
 
 class Attention_Params(TypedDict):
@@ -54,6 +55,12 @@ def load_bert_weights(
 ) -> Transformer_Params:
     state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
 
+    # TODO: grab increased vocab size from Tokenizer
+    state_dict[f"{prefix}.embeddings.word_embeddings.weight"] = increase_embed_size(
+        state_dict[f"{prefix}.embeddings.word_embeddings.weight"],
+        len(tokenizer.BERT_NEW_TOKENS),
+    )
+
     layers: List[Layer_Params] = []
     for i in range(config.num_hidden_layers):
         base = f"{prefix}.encoder.layer.{i}"
@@ -93,6 +100,10 @@ def load_gpt2_weights(
 ) -> Transformer_Params:
     state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
 
+    state_dict["wte.weight"] = increase_embed_size(
+        state_dict["wte.weight"], len(tokenizer.GPT2_NEW_TOKENS)
+    )
+
     layers: List[Layer_Params] = []
     for i in range(config.num_hidden_layers):
         qkv_weights = state_dict[f"h.{i}.attn.c_attn.weight"]
@@ -121,6 +132,24 @@ def load_gpt2_weights(
         "layernorm": state_dict["ln_f.weight"],
         "layers": layers,
     }
+
+
+def increase_embed_size(
+    old_embeddings: torch.Tensor, new_vocab_size: int
+) -> torch.Tensor:
+    new_embeddings = init.normal_(
+        torch.empty(
+            old_embeddings.shape[0] + new_vocab_size,
+            old_embeddings.shape[1],
+            dtype=old_embeddings.dtype,
+            device=old_embeddings.device,
+        ),
+        mean=0.0,
+        std=0.02,
+    )
+    new_embeddings[: old_embeddings.shape[0]] = old_embeddings
+
+    return new_embeddings
 
 
 def split_qkv_weights(

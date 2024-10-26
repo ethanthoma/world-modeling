@@ -14,6 +14,9 @@ def attention(
     memory: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    if memory is not None:
+        x = layer_norm(params["layernorm"], x)
+
     k_v_states = memory if memory is not None else x
 
     seq_len = x.shape[0]
@@ -34,21 +37,25 @@ def attention(
         :, :seq_len, :kv_seq_len
     ]
 
-    # for GPT2 models as the k_v_states is twice as large
-    if bias.shape[-1] != scores.shape[-1]:
-        bias = bias.repeat(1, 1, 2)
-
     scores = scores + bias
 
     if mask is not None:
-        scores = scores.masked_fill(mask[None, None, :] == 0, float("-inf"))
+        scores = scores.masked_fill(
+            mask[None, :, :] == 0, -0.7 * float(torch.finfo(scores.dtype).max)
+        )
 
     attn = torch.softmax(scores, dim=-1)
 
     out = torch.einsum("hqk,nkd->nqd", attn, v)
     out = out.transpose(0, 1).contiguous().view(seq_len, -1)
+    out = torch.einsum("sd,dh->sh", out, params["output"])
 
-    return torch.einsum("sd,dh->sh", out, params["output"])
+    out = out + x
+
+    if memory is None:
+        out = layer_norm(params["layernorm"], out)
+
+    return out
 
 
 def feed_forward(params: weights.Feed_Forward_Params, x: torch.Tensor) -> torch.Tensor:
@@ -58,17 +65,19 @@ def feed_forward(params: weights.Feed_Forward_Params, x: torch.Tensor) -> torch.
 
     if gated:
         h_gated, h_ungated = h.chunk(2, dim=1)
-        h = torch.nn.functional.gelu(h_gated) * h_ungated
+        h = F.gelu(h_gated) * h_ungated
     else:
-        h = torch.nn.functional.gelu(h)
+        h = F.gelu(h)
 
     h = torch.einsum("td,df->tf", h, params["output"])
 
-    return layer_norm(h, params["layernorm"])
+    h = layer_norm(params["layernorm"], h)
+
+    return x + h
 
 
 def layer_norm(
-    x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-12
+    weight: torch.Tensor, x: torch.Tensor, eps: float = 1e-12
 ) -> torch.Tensor:
     mean = x.mean(-1, keepdim=True)
     var = x.var(-1, keepdim=True, unbiased=False)
@@ -81,20 +90,9 @@ def transformer_layer(
     memory: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    if memory is None:
-        h_attn = attention(params["attention"], h, mask=mask)
-        h = h + h_attn
-        h = layer_norm(h, params["attention"]["layernorm"])
+    h = attention(params["attention"], h, memory=memory, mask=mask)
 
-    # for GPT2 models for cross-attention
-    if memory is not None:
-        h = layer_norm(h, params["attention"]["layernorm"])
-        h_attn = attention(params["attention"], h, memory=memory)
-        h = h + h_attn
-
-    h_ffn = feed_forward(params["feed_forward"], h)
-    h = h + h_ffn
-    h = layer_norm(h, params["feed_forward"]["layernorm"])
+    h = feed_forward(params["feed_forward"], h)
 
     return h
 
@@ -102,14 +100,18 @@ def transformer_layer(
 def bert_model(
     params: weights.Transformer_Params,
     input_ids: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
+    attention_mask: torch.Tensor,
 ) -> torch.Tensor:
-    embeddings = params["embeddings"][input_ids]
+    attention_mask = attention_mask = attention_mask[:, None].expand(
+        attention_mask.size(0), attention_mask.size(0)
+    )
 
-    h = layer_norm(embeddings, params["layernorm"])
+    h = params["embeddings"][input_ids]
 
     for layer in params["layers"]:
         h = transformer_layer(layer, h, mask=attention_mask)
+
+    h = layer_norm(params["layernorm"], h)
 
     return h
 
@@ -125,6 +127,11 @@ def aggregate_encodings(
 
     for layer in params["layers"]:
         h = transformer_layer(layer, h)
+
+    # paper doesn't say how to merge embedding dims
+    # since its trained from scratch, gated should be fine
+    h_gated, h_ungated = h.chunk(2, dim=0)
+    h = F.gelu(h_gated) * h_ungated
 
     return h
 
@@ -148,7 +155,11 @@ def gpt2(
             mask=causal_mask,
         )
 
-    return h
+    h = layer_norm(params["layernorm"], h)
+
+    logits = torch.einsum("sd,vd->sv", h, params["embeddings"])
+
+    return logits
 
 
 def worldformer(
