@@ -1,3 +1,4 @@
+import copy
 import pathlib
 from dataclasses import dataclass
 from typing import List, Tuple
@@ -15,6 +16,7 @@ class Attention_Params:
     value: torch.Tensor
     output: torch.Tensor
     layernorm: torch.Tensor
+    num_attention_heads: int
 
 
 @dataclass
@@ -33,32 +35,19 @@ class Layer_Params:
 @dataclass
 class BERT_Params:
     embeddings: torch.Tensor
-    position_embeddings: torch.Tensor
-    token_type_embeddings: torch.Tensor
     layernorm: torch.Tensor
     layers: List[Layer_Params]
-    pooler: torch.Tensor
-
-
-@dataclass
-class GPT2_Layer_Params:
-    attention: Attention_Params
-    mlp: Feed_Forward_Params
-    ln_1: torch.Tensor
-    ln_2: torch.Tensor
 
 
 @dataclass
 class GPT2_Params:
-    wte: torch.Tensor
-    wpe: torch.Tensor
-    ln_f: torch.Tensor
-    layers: List[GPT2_Layer_Params]
+    embeddings: torch.Tensor
+    layernorm: torch.Tensor
+    layers: List[Layer_Params]
 
 
 @dataclass
 class Aggregator_Params:
-    projection: torch.Tensor
     layernorm: torch.Tensor
     layers: List[Layer_Params]
 
@@ -73,27 +62,33 @@ class Worldformer_Params:
 
 
 def load_bert_weights(
-    ckpt_path: pathlib.Path, config: config.BERT_Config, prefix: str = "bert"
+    config: config.BERT_Config,
+    ckpt_path: pathlib.Path,
+    prefix: str = "bert",
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
 ) -> BERT_Params:
-    state_dict = torch.load(
-        ckpt_path, map_location=torch.device("cpu"), weights_only=True
-    )
+    state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
 
     layers = []
     for i in range(config.num_hidden_layers):
         base = f"{prefix}.encoder.layer.{i}"
+
+        qkv_weights = state_dict[f"{base}.attention.self.Wqkv.weight"]
+        q, k, v = split_qkv_weights(qkv_weights)
+
         attention_params = Attention_Params(
-            query=state_dict[f"{base}.attention.self.query.weight"],
-            key=state_dict[f"{base}.attention.self.key.weight"],
-            value=state_dict[f"{base}.attention.self.value.weight"],
+            query=q,
+            key=k,
+            value=v,
             output=state_dict[f"{base}.attention.output.dense.weight"],
-            layernorm=state_dict[f"{base}.attention.output.LayerNorm.gamma"],
+            layernorm=state_dict[f"{base}.attention.output.LayerNorm.weight"],
+            num_attention_heads=config.num_attention_heads,
         )
 
         feed_forward_params = Feed_Forward_Params(
-            intermediate=state_dict[f"{base}.intermediate.dense.weight"],
-            output=state_dict[f"{base}.output.dense.weight"],
-            layernorm=state_dict[f"{base}.output.LayerNorm.gamma"],
+            intermediate=state_dict[f"{base}.mlp.gated_layers.weight"].T,
+            output=state_dict[f"{base}.mlp.wo.weight"].T,
+            layernorm=state_dict[f"{base}.mlp.layernorm.weight"],
         )
 
         layers.append(
@@ -102,28 +97,20 @@ def load_bert_weights(
 
     return BERT_Params(
         embeddings=state_dict[f"{prefix}.embeddings.word_embeddings.weight"],
-        position_embeddings=state_dict[
-            f"{prefix}.embeddings.position_embeddings.weight"
-        ],
-        token_type_embeddings=state_dict[
-            f"{prefix}.embeddings.token_type_embeddings.weight"
-        ],
-        layernorm=state_dict[f"{prefix}.embeddings.LayerNorm.gamma"],
+        layernorm=state_dict[f"{prefix}.embeddings.LayerNorm.weight"],
         layers=layers,
-        pooler=state_dict[f"{prefix}.pooler.dense.weight"],
     )
 
 
 def load_gpt2_weights(
-    ckpt_path: pathlib.Path, config: config.GPT2_Config
+    config: config.GPT2_Config,
+    ckpt_path: pathlib.Path,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
 ) -> GPT2_Params:
-    state_dict = torch.load(
-        ckpt_path, map_location=torch.device("cpu"), weights_only=True
-    )
+    state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
 
     layers = []
     for i in range(config.num_hidden_layers):
-        # Split concatenated QKV weights
         qkv_weights = state_dict[f"h.{i}.attn.c_attn.weight"]
         q, k, v = split_qkv_weights(qkv_weights)
 
@@ -133,6 +120,7 @@ def load_gpt2_weights(
             value=v,
             output=state_dict[f"h.{i}.attn.c_proj.weight"],
             layernorm=state_dict[f"h.{i}.ln_1.weight"],
+            num_attention_heads=config.num_attention_heads,
         )
 
         feed_forward_params = Feed_Forward_Params(
@@ -141,26 +129,86 @@ def load_gpt2_weights(
             layernorm=state_dict[f"h.{i}.ln_2.weight"],
         )
 
-        layer = GPT2_Layer_Params(
+        layer = Layer_Params(
             attention=attention_params,
-            mlp=feed_forward_params,
-            ln_1=state_dict[f"h.{i}.ln_1.weight"],
-            ln_2=state_dict[f"h.{i}.ln_2.weight"],
+            feed_forward=feed_forward_params,
         )
 
         layers.append(layer)
 
     return GPT2_Params(
-        wte=state_dict["wte.weight"],
-        wpe=state_dict["wpe.weight"],
-        ln_f=state_dict["ln_f.weight"],
+        embeddings=state_dict["wte.weight"],
+        layernorm=state_dict["ln_f.weight"],
         layers=layers,
     )
 
 
 def split_qkv_weights(
-    c_attn_weight: torch.Tensor,
+    attn_weight: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    hidden_size = c_attn_weight.shape[0]
-    split_size = hidden_size
-    return tuple(c_attn_weight.split(split_size, dim=1))
+    dim1, dim2 = attn_weight.shape
+    split_dim = 1 if dim1 < dim2 else 0
+    hidden_size = min(attn_weight.shape)
+    return tuple(attn_weight.split(hidden_size, dim=split_dim))
+
+
+def init_aggregator_weights(
+    config: config.Aggregator_Config,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+) -> Aggregator_Params:
+    def init_linear(out_features: int, in_features: int) -> torch.Tensor:
+        weight = torch.empty(out_features, in_features, device=device)
+        init.normal_(weight, mean=0.0, std=0.02)
+        return weight
+
+    layers: List[Layer_Params] = []
+    for _ in range(config.num_hidden_layers):
+        attention_params = Attention_Params(
+            query=init_linear(config.hidden_size, config.hidden_size),
+            key=init_linear(config.hidden_size, config.hidden_size),
+            value=init_linear(config.hidden_size, config.hidden_size),
+            output=init_linear(config.hidden_size, config.hidden_size),
+            layernorm=torch.ones(config.hidden_size, device=device),
+            num_attention_heads=config.num_attention_heads,
+        )
+
+        feed_forward_params = Feed_Forward_Params(
+            intermediate=init_linear(config.hidden_size, config.intermediate_size),
+            output=init_linear(config.intermediate_size, config.hidden_size),
+            layernorm=torch.ones(config.hidden_size, device=device),
+        )
+
+        layers.append(
+            Layer_Params(attention=attention_params, feed_forward=feed_forward_params)
+        )
+
+    return Aggregator_Params(
+        layernorm=torch.ones(config.hidden_size, device=device),
+        layers=layers,
+    )
+
+
+def init_worldformer(
+    config: config.Worldformer_Config,
+    bert_path: pathlib.Path,
+    gpt2_path: pathlib.Path,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+) -> Worldformer_Params:
+    text_encoder = load_bert_weights(config.encoder_config, bert_path, device=device)
+    graph_encoder = copy.deepcopy(text_encoder)
+
+    action_decoder = load_gpt2_weights(config.decoder_config, gpt2_path, device=device)
+    graph_decoder = copy.deepcopy(action_decoder)
+
+    aggregator = init_aggregator_weights(
+        config.aggregator_config,
+        device=device,
+    )
+
+    return Worldformer_Params(
+        text_encoder=text_encoder,
+        graph_encoder=graph_encoder,
+        aggregator=aggregator,
+        action_decoder=action_decoder,
+        graph_decoder=graph_decoder,
+    )

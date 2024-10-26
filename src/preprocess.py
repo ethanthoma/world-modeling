@@ -5,9 +5,8 @@ import data
 
 
 class Input(NamedTuple):
-    textual_observations: str
-    valid_actions: Set[Tuple[str, str]]
-    graph: Set[Tuple[str, str, str]]
+    textual_encoder_input: str
+    graph_encoder_input: str
 
 
 class Target(NamedTuple):
@@ -15,40 +14,45 @@ class Target(NamedTuple):
     graph_additions: Set[Tuple[str, str, str]]
 
 
-def preprocess(sample: data.JerichoSample) -> Tuple[Tuple[str, str], Target]:
-    input = Input(
-        textual_observations=sample["state"]["obs"],
-        valid_actions={(k, v) for k, v in sample["state"]["valid_acts"].items()},
-        graph={(s, r, o) for s, r, o in sample["state"]["graph"]},
-    )
-    input = to_text(input)
-
-    target = Target(
-        valid_actions_next={
-            (k, v) for k, v in sample["next_state"]["valid_acts"].items()
-        },
-        graph_additions=knowledge_graph_additions(sample),
-    )
+def preprocess(sample: data.JerichoSample) -> Tuple[Input, Target]:
+    input = input_from_sample(sample)
+    target = target_from_sample(sample)
 
     return input, target
 
 
-def knowledge_graph_additions(sample: data.JerichoSample) -> Set[Tuple[str, str, str]]:
-    current_graph = {(s, r, o) for s, r, o in sample["state"]["graph"]}
-    next_graph = {(s, r, o) for s, r, o in sample["next_state"]["graph"]}
+def input_from_sample(sample: data.JerichoSample) -> Input:
+    textual_observations = sample["state"]["obs"]
+    valid_actions = {(k, v) for k, v in sample["state"]["valid_acts"].items()}
+    graph = {(s, r, o) for s, r, o in sample["state"]["graph"]}
 
-    return next_graph - current_graph
-
-
-def to_text(input: Input) -> Tuple[str, str]:
     valid_actions_string = " ".join(
-        itertools.starmap(lambda _, act: f"[ACT] {act}", input.valid_actions)
+        itertools.starmap(lambda _, act: f"[ACT] {act}", valid_actions)
     )
-    textual_encoder_input = f"[OBS] {input.textual_observations} {valid_actions_string}"
+    textual_encoding = f"[OBS] {textual_observations} {valid_actions_string}"
 
     graph_string = " [TRIPLE]".join(
-        itertools.starmap(lambda s, r, o: f" {s}, {r}, {o}", input.graph)
+        itertools.starmap(lambda s, r, o: f" {s}, {r}, {o}", graph)
     )
-    graph_encoder_input = f"[GRAPH]{graph_string}"
+    graph_encoding = f"[GRAPH]{graph_string}"
 
-    return textual_encoder_input, graph_encoder_input
+    return Input(textual_encoding, graph_encoding)
+
+
+def target_from_sample(sample: data.JerichoSample) -> Target:
+    valid_actions_next = {(k, v) for k, v in sample["next_state"]["valid_acts"].items()}
+
+    current_graph = {(s, r, o) for s, r, o in sample["state"]["graph"]}
+    next_graph = {(s, r, o) for s, r, o in sample["next_state"]["graph"]}
+    graph_additions = next_graph - current_graph
+
+    actions_encoding = " ".join(
+        itertools.starmap(lambda _, act: f"[ACT] {act}", valid_actions_next)
+    )
+
+    graph_string = " [TRIPLE]".join(
+        itertools.starmap(lambda s, r, o: f" {s}, {r}, {o}", graph_additions)
+    )
+    graph_encoding = f"[GRAPH]{graph_string}"
+
+    return Target(actions_encoding, graph_encoding)

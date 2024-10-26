@@ -33,6 +33,9 @@ class JerichoSample(TypedDict):
 
 
 def data(filepath: str, chunk_size: int = 4096) -> Iterable[JerichoSample]:
+    """
+    JSON streamer, loads in chunks until complete JSON is found
+    """
     with open(filepath, "r") as f:
         buffer = ""
         chunk = f.read(2)
