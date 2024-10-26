@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+mkdir -p data/jericho-world
+
+curl -L https://github.com/JerichoWorld/JerichoWorld/blob/main/data.zip -o data/data.zip
+unzip data/data.zip -d data/jericho-world
+rm data/data.zip

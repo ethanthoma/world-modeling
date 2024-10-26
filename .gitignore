@@ -2,11 +2,13 @@
 !.gitignore
 !*.md
 
+!flake.nix
+!flake.lock
+
 */__pycache__/*
 !src/
 !pyproject.toml
 !uv.lock
 !.python-version
 
-!flake.nix
-!flake.lock
+!scripts/

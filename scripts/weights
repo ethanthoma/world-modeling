@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+mkdir -p weights/
+
+curl -L https://huggingface.co/mosaicml/mosaic-bert-base-seqlen-1024/resolve/main/pytorch_model.bin -o weights/bert.bin
+curl -L https://huggingface.co/openai-community/gpt2/resolve/main/pytorch_model.bin -o weights/gpt2.bin
