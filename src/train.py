@@ -1,8 +1,6 @@
 import functools
 import itertools
 import pathlib
-import sys
-import threading
 import time
 from collections.abc import Callable
 from typing import Any, Dict, Iterable, List, Tuple, Union
@@ -25,6 +23,8 @@ BATCH_SIZE = 1
 BERT_PATH = pathlib.Path("./weights/bert.bin")
 GPT2_PATH = pathlib.Path("./weights/gpt2.bin")
 TRAIN_DATA_PATH = pathlib.Path("./data/jericho-world/train.json")
+LR = 3e-4
+PAD_TOKEN_ID = tokenizer.GPT2_TOKENIZER.eos_token_id
 
 
 def train(num_epochs: int = NUM_EPOCHS) -> None:
@@ -40,7 +40,11 @@ def train(num_epochs: int = NUM_EPOCHS) -> None:
     # ** Model **
     params = weights.init_worldformer(config.WORLDFORMER_CONFIG, BERT_PATH, GPT2_PATH)
 
-    batched_predict = func.vmap(model.worldformer, in_dims=(None, *([0] * 8)))
+    batched_predict = func.vmap(
+        model.worldformer,
+        in_dims=(None, *([0] * 8)),
+        randomness="different",
+    )
 
     # ** Training Loop **
     for epoch in range(num_epochs):
@@ -61,6 +65,8 @@ def train(num_epochs: int = NUM_EPOCHS) -> None:
                     f"Epoch: {epoch + 1}/{num_epochs} | Step: {step} | Loss: {loss}"
                 )
 
+                del loss
+
         epoch_time = time.time() - start_time
         avg_loss = total_loss / steps
 
@@ -74,7 +80,6 @@ def update(
     predict: Callable[[Any, Any], torch.Tensor],
     input: preprocess.Input,
     target: preprocess.Target,
-    lr: float = 3e-4,
 ) -> Tuple[weights.Worldformer_Params, torch.Tensor]:
     grads, loss_value = func.grad_and_value(loss, argnums=0)(
         params, predict, input, target
@@ -84,7 +89,8 @@ def update(
         updated = {}
         for k, v in p.items():
             if isinstance(v, torch.Tensor):
-                updated[k] = v - lr * g[k]
+                updated[k] = update_tensor_with_grads(v, g[k], LR)
+                del g[k]
             elif isinstance(v, dict):
                 updated[k] = update_params(v, g[k])
             elif isinstance(v, list):
@@ -95,7 +101,18 @@ def update(
                 updated[k] = v
         return updated
 
-    return update_params(params, grads), loss_value.item()
+    updated_params = update_params(params, grads)
+
+    del grads
+
+    return updated_params, loss_value.item()
+
+
+@jit.script
+def update_tensor_with_grads(
+    params: torch.Tensor, grads: torch.Tensor, lr: float
+) -> torch.Tensor:
+    return params.sub_(lr * grads)
 
 
 def loss(
@@ -119,40 +136,65 @@ def loss(
     action_boundaries = action_boundaries[..., 1:]
     graph_boundaries = graph_boundaries[..., 1:]
 
-    action_loss = compute_sos_loss(action_logits, action_targets, action_boundaries)
-    graph_loss = compute_sos_loss(graph_logits, graph_targets, graph_boundaries)
+    action_loss = compute_sos_loss(
+        action_logits,
+        action_targets,
+        action_boundaries,
+        PAD_TOKEN_ID,
+    )
+    graph_loss = compute_sos_loss(
+        graph_logits,
+        graph_targets,
+        graph_boundaries,
+        PAD_TOKEN_ID,
+    )
 
     total_loss = action_loss + graph_loss
 
     return total_loss.squeeze()
 
 
+@jit.script
 def compute_sos_loss(
     logits: torch.Tensor,  # [batch_size, seq_len, vocab_size]
     targets: torch.Tensor,  # [batch_size, seq_len]
     boundaries: torch.Tensor,  # [batch_size, seq_len]
+    pad_token_id: int,
 ) -> torch.Tensor:
     batch_size = logits.size(0)
+    seq_len = targets.size(1)
     device = logits.device
 
-    attention_mask = (targets != tokenizer.GPT2_TOKENIZER.pad_token_id).float()
+    attention_mask = torch.ne(targets, pad_token_id)
+    attention_mask = attention_mask.to(dtype=torch.float32)
 
     total_loss = torch.zeros(1, device=device)
     total_sequences = 0
 
     for b in range(batch_size):
-        seq_starts = torch.where(boundaries[b] == 1)[0]
+        # Get indices where boundaries == 1
+        seq_starts = boundaries[b].nonzero().squeeze(-1)
 
-        if len(seq_starts) == 0:
+        if seq_starts.size(0) == 0:
             continue
 
-        seq_starts = torch.cat(
-            [seq_starts, torch.tensor([targets.size(1)], device=device)]
-        )
+        # Process each sequence
+        last_start_idx = -1
+        for i in range(seq_starts.size(0)):
+            start_idx = int(seq_starts[i].item())
 
-        for i in range(len(seq_starts) - 1):
-            start_idx = seq_starts[i]
-            end_idx = seq_starts[i + 1]
+            # If this is the last sequence, end at seq_len
+            # Otherwise, end at the next start index
+            if i < seq_starts.size(0) - 1:
+                end_idx = int(seq_starts[i + 1].item())
+            else:
+                end_idx = seq_len
+
+            # Skip invalid sequences
+            if start_idx >= end_idx or start_idx <= last_start_idx:
+                continue
+
+            last_start_idx = start_idx
 
             seq_logits = logits[b, start_idx:end_idx]
             seq_targets = targets[b, start_idx:end_idx]
@@ -162,10 +204,10 @@ def compute_sos_loss(
                 continue
 
             seq_loss = F.cross_entropy(
-                seq_logits.view(-1, seq_logits.size(-1)),
-                seq_targets.view(-1),
+                seq_logits.reshape(-1, seq_logits.size(-1)),
+                seq_targets.reshape(-1),
                 reduction="none",
-                ignore_index=tokenizer.GPT2_TOKENIZER.pad_token_id,
+                ignore_index=pad_token_id,
             )
 
             valid_tokens = seq_mask.sum()
@@ -175,31 +217,3 @@ def compute_sos_loss(
                 total_sequences += 1
 
     return total_loss / max(total_sequences, 1)
-
-
-def get_sequence_mask(
-    token_ids: torch.Tensor,
-    boundaries: torch.Tensor,
-) -> torch.Tensor:
-    batch_size, seq_length = token_ids.size()
-    device = token_ids.device
-
-    mask = torch.tril(torch.ones(seq_length, seq_length, device=device))
-    mask = mask.view(1, seq_length, seq_length).expand(batch_size, -1, -1)
-
-    for b in range(batch_size):
-        seq_starts = torch.where(boundaries[b] == 1)[0]
-
-        if len(seq_starts) == 0:
-            continue
-
-        seq_starts = torch.cat([seq_starts, torch.tensor([seq_length], device=device)])
-
-        for i in range(len(seq_starts) - 1):
-            start_idx = seq_starts[i]
-            end_idx = seq_starts[i + 1]
-
-            mask[b, start_idx:end_idx, :start_idx] = 0
-            mask[b, start_idx:end_idx, end_idx:] = 0
-
-    return mask * (token_ids != tokenizer.GPT2_TOKENIZER.pad_token_id).unsqueeze(1)
