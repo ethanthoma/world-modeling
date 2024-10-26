@@ -1,114 +1,120 @@
+import functools
+import itertools
+import pathlib
 import sys
+import threading
 import time
-from typing import Callable, Iterable, List, Tuple
+from collections.abc import Callable
+from typing import Any, Dict, Iterable, List, Tuple, Union
 
 import torch
 import torch.func as func
+import torch.jit as jit
 import torch.nn.functional as F
 
-from config import Transformer_Config
-from weights import Transformer_Weights
+import config
+import data
+import model
+import preprocess
+import spinner
+import tokenizer
+import weights
+
+NUM_EPOCHS = 5
+BATCH_SIZE = 16
+BERT_PATH = pathlib.Path("./weights/bert.bin")
+GPT2_PATH = pathlib.Path("./weights/gpt2.bin")
+TRAIN_DATA_PATH = pathlib.Path("./data/jericho-world/train.json")
 
 
-def cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    return F.cross_entropy(logits, targets)
+def train(num_epochs: int = NUM_EPOCHS) -> None:
+    # ** Dataset **
+    raw_data = data.data(TRAIN_DATA_PATH)
 
+    preprocessed_data = map(preprocess.preprocess, raw_data)
 
-def loss(
-    params: Any,
-    x: Any,
-    targets: torch.Tensor,
-    predict: Callable[[Any, Any], torch.Tensor],
-):
-    logits = func.vmap(predict, in_dims=(None, 0))(params, x)
-    return cross_entropy(logits, targets)
+    batched_data = itertools.starmap(
+        zip, itertools.batched(preprocessed_data, BATCH_SIZE)
+    )
 
+    # ** Model **
+    params = weights.init_worldformer(config.WORLDFORMER_CONFIG, BERT_PATH, GPT2_PATH)
 
-@torch.jit.script
-def update(
-    params: Any,
-    x: Any,
-    y: torch.Tensor,
-    predict: Callable[[Any, Any], torch.Tensor],
-    step_size: float = 0.01,
-) -> List[Any]:
-    grads = func.grad(loss)(params, x, y, predict)
-    return [
-        (w - step_size * dw, b - step_size * db)
-        for (w, b), (dw, db) in zip(params, grads)
-    ]
+    batched_predict = func.vmap(model.worldformer, in_dims=(None, *([0] * 8)))
 
-
-def train(
-    params: Any, training_generator: Iterable[Tuple[Any, Any]], num_epochs: int = 5
-):
-    for epoch in range(num_epochs):
-        start_time = time.time()
-        for x, y in training_generator:
-            params = update(params, x, y)
-        epoch_time = time.time() - start_time
-
-        print("Epoch {} in {:0.2f} sec".format(epoch, epoch_time))
-
-
-def get_transformer_parameters(weights: Transformer_Weights) -> List[torch.Tensor]:
-    params = []
-    for layer in weights.layers:
-        params.extend(
-            [
-                layer.rms_norm_weights_attention.weight,
-                layer.attention_weights.q,
-                layer.attention_weights.k,
-                layer.attention_weights.v,
-                layer.attention_weights.out,
-                layer.rms_norm_weights_ffn.weight,
-                layer.feed_forward_weights.weight_1,
-                layer.feed_forward_weights.weight_2,
-                layer.feed_forward_weights.weight_3,
-            ]
-        )
-    params.extend([weights.norm.weight, weights.weight])
-    return params
-
-
-def train(
-    params: Any,
-    optimizer: torch.optim.Optimizer,
-    data_generator: Callable[[], Tuple[torch.Tensor, torch.Tensor]],
-    num_epochs: int,
-    model: Callable[[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]],
-):
-    def spinner_generator():
-        while True:
-            for char in "|/-\\":
-                yield char
-
-    spinner = spinner_generator()
-
+    # ** Training Loop **
     for epoch in range(num_epochs):
         start_time = time.time()
         step = None
 
-        for step, (inputs, targets) in enumerate(data_generator()):
-            optimizer.zero_grad()
+        total_loss = 0
 
-            loss = loss(params, inputs, targets, transformer)
+        with spinner.spinner() as w:
+            w.write(f"Epoch {epoch + 1}/{num_epochs} - Step 0")
 
-            loss.backward()
+            for step, (input, target) in enumerate(batched_data):
+                params = update(params, batched_predict, input, target)
 
-            optimizer.step()
-
-            sys.stdout.write(
-                f"\rEpoch {epoch + 1}/{num_epochs} - Step {step} {next(spinner)}"
-            )
-            sys.stdout.flush()
+                w.write(f"Epoch {epoch + 1}/{num_epochs} - Step {step}")
 
         epoch_time = time.time() - start_time
         avg_loss = total_loss / steps
 
-        sys.stdout.write("\r" + " " * (80) + "\r")
-        sys.stdout.flush()
-
         print(
             f"Epoch {epoch + 1}/{num_epochs} - Steps: {steps}, Avg Loss: {avg_loss:.4f}, Time: {epoch_time:.2f}s"
         )
+
+
+def update(
+    params: weights.Worldformer_Params,
+    predict: Callable[[Any, Any], torch.Tensor],
+    input: preprocess.Input,
+    target: preprocess.Target,
+) -> weights.Worldformer_Params:
+    grads = func.grad(loss, argnums=0)(params, predict, input, target)
+    return params
+
+
+def loss(
+    params: weights.Worldformer_Params,
+    predict: Callable[[Any, Any], torch.Tensor],
+    input: preprocess.Input,
+    target: preprocess.Target,
+) -> torch.Tensor:
+    tokens_input = tokenizer.tokenize_input(input)
+    tokens_target = tokenizer.tokenize_target(target)
+
+    action_logits, graph_logits = predict(params, *tokens_input, *tokens_target)
+
+    action_logits = action_logits[..., :-1, :]
+    graph_logits = graph_logits[..., :-1, :]
+
+    action_targets, graph_targets, action_mask, graph_mask = tokens_target
+
+    action_targets = action_targets[..., 1:]
+    graph_targets = graph_targets[..., 1:]
+    action_mask = action_mask[..., 1:]
+    graph_mask = graph_mask[..., 1:]
+
+    # ** Action Loss **
+    action_loss = F.cross_entropy(
+        action_logits.reshape(-1, action_logits.size(-1)),
+        action_targets.reshape(-1),
+        reduction="none",
+    ).reshape_as(action_targets)
+
+    action_loss = (action_loss * action_mask).sum() / action_mask.sum()
+
+    # ** Graph Loss **
+    graph_loss = F.cross_entropy(
+        graph_logits.reshape(-1, graph_logits.size(-1)),
+        graph_targets.reshape(-1),
+        reduction="none",
+    ).reshape_as(graph_targets)
+
+    graph_loss = (graph_loss * graph_mask).sum() / graph_mask.sum()
+
+    # ** Total Loss **
+    total_loss = action_loss + graph_loss
+
+    return total_loss

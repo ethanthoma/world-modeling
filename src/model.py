@@ -10,6 +10,7 @@ import weights
 def attention(
     params: weights.Attention_Params,
     x: torch.Tensor,
+    num_attention_heads: int = 6,
     memory: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -17,19 +18,19 @@ def attention(
 
     seq_len = x.shape[0]
     kv_seq_len = k_v_states.shape[0]
-    head_dim = params.query.shape[0] // params.num_attention_heads
+    head_dim = params["query"].shape[0] // num_attention_heads
 
-    q = torch.einsum("sd,dh->sh", x, params.query)
-    k = torch.einsum("sd,dh->sh", k_v_states, params.key)
-    v = torch.einsum("sd,dh->sh", k_v_states, params.value)
+    q = torch.einsum("sd,dh->sh", x, params["query"])
+    k = torch.einsum("sd,dh->sh", k_v_states, params["key"])
+    v = torch.einsum("sd,dh->sh", k_v_states, params["value"])
 
-    q = q.view(seq_len, params.num_attention_heads, head_dim).transpose(0, 1)
-    k = k.view(kv_seq_len, params.num_attention_heads, head_dim).transpose(0, 1)
-    v = v.view(kv_seq_len, params.num_attention_heads, head_dim).transpose(0, 1)
+    q = q.view(seq_len, num_attention_heads, head_dim).transpose(0, 1)
+    k = k.view(kv_seq_len, num_attention_heads, head_dim).transpose(0, 1)
+    v = v.view(kv_seq_len, num_attention_heads, head_dim).transpose(0, 1)
 
     scores = torch.einsum("nqd,nkd->nqk", q, k) / (head_dim**0.5)
 
-    bias = alibi.build_alibi_bias(params.num_attention_heads, seq_len, x.device)[
+    bias = alibi.build_alibi_bias(num_attention_heads, seq_len, x.device)[
         :, :seq_len, :kv_seq_len
     ]
 
@@ -47,13 +48,13 @@ def attention(
     out = torch.einsum("hqk,nkd->nqd", attn, v)
     out = out.transpose(0, 1).contiguous().view(seq_len, -1)
 
-    return torch.einsum("sd,dh->sh", out, params.output)
+    return torch.einsum("sd,dh->sh", out, params["output"])
 
 
 def feed_forward(params: weights.Feed_Forward_Params, x: torch.Tensor) -> torch.Tensor:
-    gated = params.intermediate.shape[-1] != params.output.shape[0]
+    gated = params["intermediate"].shape[-1] != params["output"].shape[0]
 
-    h = torch.einsum("td,df->tf", x, params.intermediate)
+    h = torch.einsum("td,df->tf", x, params["intermediate"])
 
     if gated:
         h_gated, h_ungated = h.chunk(2, dim=1)
@@ -61,9 +62,9 @@ def feed_forward(params: weights.Feed_Forward_Params, x: torch.Tensor) -> torch.
     else:
         h = torch.nn.functional.gelu(h)
 
-    h = torch.einsum("td,df->tf", h, params.output)
+    h = torch.einsum("td,df->tf", h, params["output"])
 
-    return layer_norm(h, params.layernorm)
+    return layer_norm(h, params["layernorm"])
 
 
 def layer_norm(
@@ -81,33 +82,33 @@ def transformer_layer(
     mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     if memory is None:
-        h_attn = attention(params.attention, h, mask=mask)
+        h_attn = attention(params["attention"], h, mask=mask)
         h = h + h_attn
-        h = layer_norm(h, params.attention.layernorm)
+        h = layer_norm(h, params["attention"]["layernorm"])
 
     # for GPT2 models for cross-attention
     if memory is not None:
-        h = layer_norm(h, params.attention.layernorm)
-        h_attn = attention(params.attention, h, memory=memory)
+        h = layer_norm(h, params["attention"]["layernorm"])
+        h_attn = attention(params["attention"], h, memory=memory)
         h = h + h_attn
 
-    h_ffn = feed_forward(params.feed_forward, h)
+    h_ffn = feed_forward(params["feed_forward"], h)
     h = h + h_ffn
-    h = layer_norm(h, params.feed_forward.layernorm)
+    h = layer_norm(h, params["feed_forward"]["layernorm"])
 
     return h
 
 
 def bert_model(
-    params: weights.BERT_Params,
+    params: weights.Transformer_Params,
     input_ids: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    embeddings = params.embeddings[input_ids]
+    embeddings = params["embeddings"][input_ids]
 
-    h = layer_norm(embeddings, params.layernorm)
+    h = layer_norm(embeddings, params["layernorm"])
 
-    for layer in params.layers:
+    for layer in params["layers"]:
         h = transformer_layer(layer, h, mask=attention_mask)
 
     return h
@@ -120,16 +121,16 @@ def aggregate_encodings(
 ) -> torch.Tensor:
     combined = torch.cat([text_hidden, graph_hidden], dim=0)
 
-    h = layer_norm(params.layernorm, combined)
+    h = layer_norm(params["layernorm"], combined)
 
-    for layer in params.layers:
+    for layer in params["layers"]:
         h = transformer_layer(layer, h)
 
     return h
 
 
 def gpt2(
-    params: weights.GPT2_Params,
+    params: weights.Transformer_Params,
     input_ids: torch.Tensor,
     encoder_hidden_states: torch.Tensor,
 ) -> torch.Tensor:
@@ -137,9 +138,9 @@ def gpt2(
     causal_mask = torch.triu(torch.ones(seq_length, seq_length), diagonal=1).bool()
     causal_mask = causal_mask.to(input_ids.device)
 
-    h = params.embeddings[input_ids]
+    h = params["embeddings"][input_ids]
 
-    for layer in params.layers:
+    for layer in params["layers"]:
         h = transformer_layer(
             layer,
             h,
@@ -162,22 +163,24 @@ def worldformer(
     graph_target_attention_mask: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     text_encoded = bert_model(
-        params.text_encoder,
+        params["text_encoder"],
         textual_input_ids,
         textual_input_attention_mask,
     )
 
     graph_encoded = bert_model(
-        params.graph_encoder,
+        params["graph_encoder"],
         graph_input_ids,
         graph_input_attention_mask,
     )
 
-    combined_state = aggregate_encodings(params.aggregator, text_encoded, graph_encoded)
+    combined_state = aggregate_encodings(
+        params["aggregator"], text_encoded, graph_encoded
+    )
 
-    action_output = (
+    action_logits = (
         gpt2(
-            params.action_decoder,
+            params["action_decoder"],
             action_target_ids,
             combined_state,
         )
@@ -185,9 +188,9 @@ def worldformer(
         else None
     )
 
-    graph_output = (
+    graph_logits = (
         gpt2(
-            params.graph_decoder,
+            params["graph_decoder"],
             graph_target_ids,
             combined_state,
         )
@@ -195,4 +198,4 @@ def worldformer(
         else None
     )
 
-    return action_output, graph_output
+    return action_logits, graph_logits

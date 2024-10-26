@@ -48,7 +48,7 @@ def tokenize_target(
         "gpt2"
     ),
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-):
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     gpt2_tokenizer.pad_token = gpt2_tokenizer.eos_token
 
     action_targets, graph_targets = zip(*target)
