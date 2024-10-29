@@ -1,6 +1,6 @@
 import copy
 import pathlib
-from typing import List, Tuple, TypedDict
+from typing import Any, Callable, List, Tuple, TypedDict, TypeVar
 
 import torch
 import torch.nn.init as init
@@ -55,10 +55,10 @@ def load_bert_weights(
 ) -> Transformer_Params:
     state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
 
-    # TODO: grab increased vocab size from Tokenizer
+    new_tokens = tokenizer.count_new_tokens(tokenizer.BERT_TOKENIZER)
+
     state_dict[f"{prefix}.embeddings.word_embeddings.weight"] = increase_embed_size(
-        state_dict[f"{prefix}.embeddings.word_embeddings.weight"],
-        len(tokenizer.BERT_NEW_TOKENS),
+        state_dict[f"{prefix}.embeddings.word_embeddings.weight"], new_tokens, std=0.02
     )
 
     layers: List[Layer_Params] = []
@@ -100,8 +100,10 @@ def load_gpt2_weights(
 ) -> Transformer_Params:
     state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
 
+    new_tokens = tokenizer.count_new_tokens(tokenizer.GPT2_TOKENIZER)
+
     state_dict["wte.weight"] = increase_embed_size(
-        state_dict["wte.weight"], len(tokenizer.GPT2_NEW_TOKENS)
+        state_dict["wte.weight"], new_tokens, std=0.02
     )
 
     layers: List[Layer_Params] = []
@@ -135,20 +137,24 @@ def load_gpt2_weights(
 
 
 def increase_embed_size(
-    old_embeddings: torch.Tensor, new_vocab_size: int
+    old_embeddings: torch.Tensor,
+    increase_vocab_size_by: int,
+    std: float = 0.02,
 ) -> torch.Tensor:
+    """
+    Increase embedding matrix size for new tokens while preserving existing embeddings
+    """
     new_embeddings = init.normal_(
         torch.empty(
-            old_embeddings.shape[0] + new_vocab_size,
+            old_embeddings.shape[0] + increase_vocab_size_by,
             old_embeddings.shape[1],
             dtype=old_embeddings.dtype,
             device=old_embeddings.device,
         ),
         mean=0.0,
-        std=0.02,
+        std=std,
     )
     new_embeddings[: old_embeddings.shape[0]] = old_embeddings
-
     return new_embeddings
 
 
@@ -215,3 +221,22 @@ def init_worldformer(
         "action_decoder": action_decoder,
         "graph_decoder": graph_decoder,
     }
+
+
+T = TypeVar("T")
+
+
+def nested_map(f: Callable[..., T], structure_args: Tuple[Any, ...], *args: Any) -> T:
+    if isinstance(structure_args[0], torch.Tensor):
+        return f(*structure_args, *args)
+    elif isinstance(structure_args[0], dict):
+        keys = structure_args[0].keys()
+        return {
+            k: nested_map(f, tuple(s[k] for s in structure_args), *args) for k in keys
+        }
+    elif isinstance(structure_args[0], list):
+        return [
+            nested_map(f, tuple(s[i] for s in structure_args), *args)
+            for i in range(len(structure_args[0]))
+        ]
+    return structure_args[0]

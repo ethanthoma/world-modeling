@@ -3,19 +3,38 @@ from typing import Tuple
 import torch
 import transformers
 
-import config
 import preprocess
 
-BERT_NEW_TOKENS = ["[ACT]", "[TRIPLE]", "[OBS]", "[GRAPH]"]
-GPT2_NEW_TOKENS = ["[ACT]", "[TRIPLE]", "[GRAPH]"]
+BERT_SPECIAL_TOKENS = {
+    "additional_special_tokens": ["[ACT]", "[TRIPLE]", "[OBS]", "[GRAPH]"],
+    "pad_token": "[PAD]",
+    "sep_token": "[SEP]",
+    "cls_token": "[CLS]",
+}
+
+GPT2_SPECIAL_TOKENS = {
+    "additional_special_tokens": ["[ACT]", "[TRIPLE]", "[GRAPH]"],
+    "pad_token": "[PAD]",
+}
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-BERT_TOKENIZER = transformers.BertTokenizer.from_pretrained("bert-base-uncased")
-BERT_TOKENIZER.add_tokens(BERT_NEW_TOKENS, special_tokens=True)
 
-GPT2_TOKENIZER = transformers.GPT2Tokenizer.from_pretrained("gpt2")
-GPT2_TOKENIZER.add_tokens(GPT2_NEW_TOKENS, special_tokens=True)
+def get_bert_tokenizer() -> transformers.BertTokenizer:
+    tokenizer = transformers.BertTokenizer.from_pretrained("bert-base-uncased")
+    tokenizer.add_special_tokens(BERT_SPECIAL_TOKENS)
+    return tokenizer
+
+
+def get_gpt2_tokenizer() -> transformers.GPT2Tokenizer:
+    tokenizer = transformers.GPT2Tokenizer.from_pretrained("gpt2")
+    # GPT2 doesn't have pad_token by default
+    tokenizer.add_special_tokens(GPT2_SPECIAL_TOKENS)
+    return tokenizer
+
+
+BERT_TOKENIZER = get_bert_tokenizer()
+GPT2_TOKENIZER = get_gpt2_tokenizer()
 
 
 def tokenize_input(
@@ -24,45 +43,43 @@ def tokenize_input(
     bert_tokenizer: transformers.BertTokenizer = BERT_TOKENIZER,
     device: torch.device = DEVICE,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    textual_inputs, graph_inputs = zip(*input)
+    """Tokenizes input text and graph with BERT tokenizer"""
+    textual_input, graph_input = zip(*input)
 
-    textual_encodings = bert_tokenizer(
-        list(textual_inputs),
+    textual_encoding = bert_tokenizer(
+        textual_input,
         max_length=input_length,
         padding="max_length",
         truncation=True,
         return_tensors="pt",
-    ).to(device)
-
-    graph_encodings = bert_tokenizer(
-        list(graph_inputs),
-        max_length=input_length,
-        padding="max_length",
-        truncation=True,
-        return_tensors="pt",
-    ).to(device)
-
-    return (
-        textual_encodings.input_ids,
-        graph_encodings.input_ids,
-        textual_encodings.attention_mask,
-        graph_encodings.attention_mask,
     )
 
+    graph_encoding = bert_tokenizer(
+        graph_input,
+        max_length=input_length,
+        padding="max_length",
+        truncation=True,
+        return_tensors="pt",
+    )
 
-def create_sequence_boundaries(
-    tokens: torch.Tensor,
-    separator_token_id: int,
-    device: torch.device = DEVICE,
-) -> torch.Tensor:
-    boundaries = torch.zeros_like(tokens, dtype=torch.float32)
+    _, textual_valid_mask = create_sequence_boundaries(
+        textual_encoding.input_ids,
+        bert_tokenizer.convert_tokens_to_ids("[ACT]"),
+        device=device,
+    )
 
-    boundaries[:, 0] = 1
+    _, graph_valid_mask = create_sequence_boundaries(
+        graph_encoding.input_ids,
+        bert_tokenizer.convert_tokens_to_ids("[TRIPLE]"),
+        device=device,
+    )
 
-    is_separator = tokens == separator_token_id
-    boundaries[:, 1:] = is_separator[:, :-1].float()
-
-    return boundaries
+    return (
+        textual_encoding.input_ids.to(device),
+        graph_encoding.input_ids.to(device),
+        textual_valid_mask,
+        graph_valid_mask,
+    )
 
 
 def tokenize_target(
@@ -71,40 +88,92 @@ def tokenize_target(
     gpt2_tokenizer: transformers.GPT2Tokenizer = GPT2_TOKENIZER,
     device: torch.device = DEVICE,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    gpt2_tokenizer.pad_token = gpt2_tokenizer.eos_token
+    """Tokenizes target actions and graph differences with GPT2 tokenizer"""
+    action_target, graph_target = zip(*target)
 
-    action_targets, graph_targets = zip(*target)
-
-    act_token_id = gpt2_tokenizer.convert_tokens_to_ids("[ACT]")
-    triple_token_id = gpt2_tokenizer.convert_tokens_to_ids("[TRIPLE]")
-
-    action_encodings = gpt2_tokenizer(
-        list(action_targets),
+    action_encoding = gpt2_tokenizer(
+        action_target,
         max_length=input_length,
         padding="max_length",
         truncation=True,
         return_tensors="pt",
-    ).to(device)
-
-    graph_encodings = gpt2_tokenizer(
-        list(graph_targets),
-        max_length=input_length,
-        padding="max_length",
-        truncation=True,
-        return_tensors="pt",
-    ).to(device)
-
-    action_boundaries = create_sequence_boundaries(
-        action_encodings.input_ids, act_token_id, device
     )
 
-    graph_boundaries = create_sequence_boundaries(
-        graph_encodings.input_ids, triple_token_id, device
+    graph_encoding = gpt2_tokenizer(
+        graph_target,
+        max_length=input_length,
+        padding="max_length",
+        truncation=True,
+        return_tensors="pt",
+    )
+
+    action_boundaries, action_valid_mask = create_sequence_boundaries(
+        action_encoding.input_ids,
+        gpt2_tokenizer.convert_tokens_to_ids("[ACT]"),
+        device=device,
+    )
+
+    graph_boundaries, graph_valid_mask = create_sequence_boundaries(
+        graph_encoding.input_ids,
+        gpt2_tokenizer.convert_tokens_to_ids("[TRIPLE]"),
+        device=device,
     )
 
     return (
-        action_encodings.input_ids,
-        graph_encodings.input_ids,
-        action_boundaries,
-        graph_boundaries,
+        action_encoding.input_ids.to(device),
+        graph_encoding.input_ids.to(device),
+        action_boundaries * action_valid_mask,
+        graph_boundaries * graph_valid_mask,
     )
+
+
+def create_sequence_boundaries(
+    tokens: torch.Tensor,
+    separator_token_id: int,
+    bos_token_id: int = None,
+    eos_token_id: int = None,
+    device: torch.device = DEVICE,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Creates sequence boundaries and valid sequence mask for Set of Sequences
+    Returns both sequence start positions and valid sequence mask
+    """
+    batch_size, seq_length = tokens.shape
+    boundaries = torch.zeros_like(tokens, dtype=torch.float32)
+    valid_mask = torch.ones_like(tokens, dtype=torch.float32)
+
+    if bos_token_id is not None:
+        boundaries = (tokens == bos_token_id).float()
+    else:
+        boundaries[:, 0] = 1
+        is_separator = tokens == separator_token_id
+        boundaries[:, 1:] = is_separator[:, :-1].float()
+
+    if eos_token_id is not None:
+        eos_positions = (tokens == eos_token_id).float().cumsum(dim=1)
+        valid_mask = (eos_positions == 0).float()
+
+    valid_mask *= (tokens != BERT_TOKENIZER.pad_token_id).float()
+    valid_mask *= (tokens != GPT2_TOKENIZER.pad_token_id).float()
+
+    return boundaries.to(device), valid_mask.to(device)
+
+
+def count_new_tokens(tokenizer: transformers.PreTrainedTokenizer) -> int:
+    """Calculate number of new tokens added to the tokenizer"""
+    match tokenizer.__class__.__name__:
+        case "GPT2Tokenizer":
+            base = transformers.GPT2Tokenizer.from_pretrained("gpt2")
+            new_tokens = len(set(tokenizer.additional_special_tokens))
+            if tokenizer.pad_token and not base.pad_token:
+                new_tokens += 1
+            if tokenizer.bos_token and not base.bos_token:
+                new_tokens += 1
+            if tokenizer.eos_token and not base.eos_token:
+                new_tokens += 1
+            return new_tokens
+        case "BertTokenizer":
+            base = transformers.BertTokenizer.from_pretrained("bert-base-uncased")
+            return len(set(tokenizer.additional_special_tokens))
+        case _:
+            assert False

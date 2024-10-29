@@ -1,3 +1,4 @@
+import functools
 from typing import List, NamedTuple, Optional, Tuple
 
 import torch
@@ -12,36 +13,45 @@ def attention(
     x: torch.Tensor,
     num_attention_heads: int = 6,
     memory: Optional[torch.Tensor] = None,
-    mask: Optional[torch.Tensor] = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    cross_attention_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     if memory is not None:
         x = layer_norm(params["layernorm"], x)
 
     k_v_states = memory if memory is not None else x
+    mask = cross_attention_mask if memory is not None else attention_mask
 
     seq_len = x.shape[0]
     kv_seq_len = k_v_states.shape[0]
-    head_dim = params["query"].shape[0] // num_attention_heads
+
+    q_head_dim = params["query"].shape[0] // num_attention_heads
+    kv_head_dim = params["key"].shape[0] // num_attention_heads
 
     q = torch.einsum("sd,dh->sh", x, params["query"])
     k = torch.einsum("sd,dh->sh", k_v_states, params["key"])
     v = torch.einsum("sd,dh->sh", k_v_states, params["value"])
 
-    q = q.view(seq_len, num_attention_heads, head_dim).transpose(0, 1)
-    k = k.view(kv_seq_len, num_attention_heads, head_dim).transpose(0, 1)
-    v = v.view(kv_seq_len, num_attention_heads, head_dim).transpose(0, 1)
+    q = q.view(seq_len, num_attention_heads, q_head_dim).transpose(0, 1)
+    k = k.view(kv_seq_len, num_attention_heads, kv_head_dim).transpose(0, 1)
+    v = v.view(kv_seq_len, num_attention_heads, kv_head_dim).transpose(0, 1)
 
-    scores = torch.einsum("nqd,nkd->nqk", q, k) / (head_dim**0.5)
+    scores = torch.einsum("nqd,nkd->nqk", q, k) / (q_head_dim**0.5)
 
-    bias = alibi.build_alibi_bias(num_attention_heads, seq_len, x.device)[
-        :, :seq_len, :kv_seq_len
-    ]
-
-    scores = scores + bias
+    if memory is None:
+        bias = alibi.build_alibi_bias(num_attention_heads, seq_len, x.device)[
+            :, :seq_len, :kv_seq_len
+        ]
+        scores = scores + bias
 
     if mask is not None:
+        if memory is None:
+            mask = mask.unsqueeze(0) * mask.unsqueeze(1)
+        else:
+            mask = mask.unsqueeze(0).expand(seq_len, -1)
+
         scores = scores.masked_fill(
-            mask[None, :, :] == 0, -0.7 * float(torch.finfo(scores.dtype).max)
+            mask == 0, -0.7 * float(torch.finfo(scores.dtype).max)
         )
 
     attn = torch.softmax(scores, dim=-1)
@@ -87,10 +97,17 @@ def layer_norm(
 def transformer_layer(
     params: weights.Layer_Params,
     h: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
     memory: Optional[torch.Tensor] = None,
-    mask: Optional[torch.Tensor] = None,
+    cross_attention_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    h = attention(params["attention"], h, memory=memory, mask=mask)
+    h = attention(
+        params["attention"],
+        h,
+        memory=memory,
+        attention_mask=attention_mask,
+        cross_attention_mask=cross_attention_mask,
+    )
 
     h = feed_forward(params["feed_forward"], h)
 
@@ -102,14 +119,10 @@ def bert_model(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
-    attention_mask = attention_mask = attention_mask[:, None].expand(
-        attention_mask.size(0), attention_mask.size(0)
-    )
-
     h = params["embeddings"][input_ids]
 
     for layer in params["layers"]:
-        h = transformer_layer(layer, h, mask=attention_mask)
+        h = transformer_layer(layer, h, attention_mask=attention_mask)
 
     h = layer_norm(params["layernorm"], h)
 
@@ -128,11 +141,6 @@ def aggregate_encodings(
     for layer in params["layers"]:
         h = transformer_layer(layer, h)
 
-    # paper doesn't say how to merge embedding dims
-    # since its trained from scratch, gated should be fine
-    h_gated, h_ungated = h.chunk(2, dim=0)
-    h = F.gelu(h_gated) * h_ungated
-
     return h
 
 
@@ -140,10 +148,16 @@ def gpt2(
     params: weights.Transformer_Params,
     input_ids: torch.Tensor,
     encoder_hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    encoder_attention_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     seq_length = input_ids.size(0)
     causal_mask = torch.triu(torch.ones(seq_length, seq_length), diagonal=1).bool()
-    causal_mask = causal_mask.to(input_ids.device)
+    causal_mask = (~causal_mask).to(input_ids.device)
+
+    if attention_mask is not None:
+        causal_mask = causal_mask.float()
+        causal_mask = causal_mask * attention_mask
 
     h = params["embeddings"][input_ids]
 
@@ -151,8 +165,9 @@ def gpt2(
         h = transformer_layer(
             layer,
             h,
+            attention_mask=causal_mask,
             memory=encoder_hidden_states,
-            mask=causal_mask,
+            cross_attention_mask=encoder_attention_mask,
         )
 
     h = layer_norm(params["layernorm"], h)
@@ -189,24 +204,33 @@ def worldformer(
         params["aggregator"], text_encoded, graph_encoded
     )
 
-    action_logits = (
-        gpt2(
+    encoder_attention_mask = None
+    if (
+        textual_input_attention_mask is not None
+        and graph_input_attention_mask is not None
+    ):
+        encoder_attention_mask = torch.cat(
+            [textual_input_attention_mask, graph_input_attention_mask], dim=0
+        )
+
+    action_logits = None
+    if action_target_ids is not None:
+        action_logits = gpt2(
             params["action_decoder"],
             action_target_ids,
             combined_state,
+            attention_mask=action_target_attention_mask,
+            encoder_attention_mask=encoder_attention_mask,
         )
-        if action_target_ids is not None
-        else None
-    )
 
-    graph_logits = (
-        gpt2(
+    graph_logits = None
+    if graph_target_ids is not None:
+        graph_logits = gpt2(
             params["graph_decoder"],
             graph_target_ids,
             combined_state,
+            attention_mask=graph_target_attention_mask,
+            encoder_attention_mask=encoder_attention_mask,
         )
-        if graph_target_ids is not None
-        else None
-    )
 
     return action_logits, graph_logits
