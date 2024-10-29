@@ -1,6 +1,6 @@
 import copy
 import pathlib
-from typing import Any, Callable, List, Tuple, TypedDict, TypeVar
+from typing import Any, List, Tuple, TypedDict
 
 import torch
 import torch.nn.init as init
@@ -8,24 +8,26 @@ import torch.nn.init as init
 import config
 import tokenizer
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 class Attention_Params(TypedDict):
     query: torch.Tensor
     key: torch.Tensor
     value: torch.Tensor
     output: torch.Tensor
-    layernorm: torch.Tensor
 
 
 class Feed_Forward_Params(TypedDict):
     intermediate: torch.Tensor
     output: torch.Tensor
-    layernorm: torch.Tensor
 
 
 class Layer_Params(TypedDict):
     attention: Attention_Params
     feed_forward: Feed_Forward_Params
+    ln_1: torch.Tensor
+    ln_2: torch.Tensor
 
 
 class Transformer_Params(TypedDict):
@@ -51,7 +53,7 @@ def load_bert_weights(
     config: config.BERT_Config,
     ckpt_path: pathlib.Path,
     prefix: str = "bert",
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    device: torch.device = DEVICE,
 ) -> Transformer_Params:
     state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
 
@@ -73,17 +75,20 @@ def load_bert_weights(
             "key": k,
             "value": v,
             "output": state_dict[f"{base}.attention.output.dense.weight"],
-            "layernorm": state_dict[f"{base}.attention.output.LayerNorm.weight"],
         }
 
         feed_forward_params: Feed_Forward_Params = {
             "intermediate": state_dict[f"{base}.mlp.gated_layers.weight"].T,
             "output": state_dict[f"{base}.mlp.wo.weight"].T,
-            "layernorm": state_dict[f"{base}.mlp.layernorm.weight"],
         }
 
         layers.append(
-            {"attention": attention_params, "feed_forward": feed_forward_params}
+            {
+                "attention": attention_params,
+                "feed_forward": feed_forward_params,
+                "ln_1": state_dict[f"{base}.attention.output.LayerNorm.weight"],
+                "ln_2": state_dict[f"{base}.mlp.layernorm.weight"],
+            }
         )
 
     return {
@@ -96,7 +101,7 @@ def load_bert_weights(
 def load_gpt2_weights(
     config: config.GPT2_Config,
     ckpt_path: pathlib.Path,
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    device: torch.device = DEVICE,
 ) -> Transformer_Params:
     state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
 
@@ -116,17 +121,20 @@ def load_gpt2_weights(
             "key": k,
             "value": v,
             "output": state_dict[f"h.{i}.attn.c_proj.weight"],
-            "layernorm": state_dict[f"h.{i}.ln_1.weight"],
         }
 
         feed_forward_params: Feed_Forward_Params = {
             "intermediate": state_dict[f"h.{i}.mlp.c_fc.weight"],
             "output": state_dict[f"h.{i}.mlp.c_proj.weight"],
-            "layernorm": state_dict[f"h.{i}.ln_2.weight"],
         }
 
         layers.append(
-            {"attention": attention_params, "feed_forward": feed_forward_params}
+            {
+                "attention": attention_params,
+                "feed_forward": feed_forward_params,
+                "ln_1": state_dict[f"h.{i}.ln_1.weight"],
+                "ln_2": state_dict[f"h.{i}.ln_2.weight"],
+            }
         )
 
     return {
@@ -169,7 +177,7 @@ def split_qkv_weights(
 
 def init_aggregator_weights(
     config: config.Aggregator_Config,
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    device: torch.device = DEVICE,
 ) -> Aggregator_Params:
     def init_linear(out_features: int, in_features: int) -> torch.Tensor:
         weight = torch.empty(out_features, in_features, device=device)
@@ -183,17 +191,20 @@ def init_aggregator_weights(
             "key": init_linear(config.hidden_size, config.hidden_size),
             "value": init_linear(config.hidden_size, config.hidden_size),
             "output": init_linear(config.hidden_size, config.hidden_size),
-            "layernorm": torch.ones(config.hidden_size, device=device),
         }
 
         feed_forward_params: Feed_Forward_Params = {
             "intermediate": init_linear(config.hidden_size, config.intermediate_size),
             "output": init_linear(config.intermediate_size, config.hidden_size),
-            "layernorm": torch.ones(config.hidden_size, device=device),
         }
 
         layers.append(
-            {"attention": attention_params, "feed_forward": feed_forward_params}
+            {
+                "attention": attention_params,
+                "feed_forward": feed_forward_params,
+                "ln_1": torch.ones(config.hidden_size, device=device),
+                "ln_2": torch.ones(config.hidden_size, device=device),
+            }
         )
 
     return {
@@ -206,7 +217,7 @@ def init_worldformer(
     config: config.Worldformer_Config,
     bert_path: pathlib.Path,
     gpt2_path: pathlib.Path,
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    device: torch.device = DEVICE,
 ) -> Worldformer_Params:
     text_encoder = load_bert_weights(config.encoder_config, bert_path, device=device)
     graph_encoder = copy.deepcopy(text_encoder)
@@ -221,22 +232,3 @@ def init_worldformer(
         "action_decoder": action_decoder,
         "graph_decoder": graph_decoder,
     }
-
-
-T = TypeVar("T")
-
-
-def nested_map(f: Callable[..., T], structure_args: Tuple[Any, ...], *args: Any) -> T:
-    if isinstance(structure_args[0], torch.Tensor):
-        return f(*structure_args, *args)
-    elif isinstance(structure_args[0], dict):
-        keys = structure_args[0].keys()
-        return {
-            k: nested_map(f, tuple(s[k] for s in structure_args), *args) for k in keys
-        }
-    elif isinstance(structure_args[0], list):
-        return [
-            nested_map(f, tuple(s[i] for s in structure_args), *args)
-            for i in range(len(structure_args[0]))
-        ]
-    return structure_args[0]

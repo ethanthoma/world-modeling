@@ -8,6 +8,15 @@ import alibi
 import weights
 
 
+@torch.jit.script
+def layer_norm(
+    weight: torch.Tensor, x: torch.Tensor, eps: float = 1e-12
+) -> torch.Tensor:
+    mean = x.mean(-1, keepdim=True)
+    var = x.var(-1, keepdim=True, unbiased=False)
+    return weight * (x - mean) / torch.sqrt(var + eps)
+
+
 def attention(
     params: weights.Attention_Params,
     x: torch.Tensor,
@@ -16,9 +25,6 @@ def attention(
     attention_mask: Optional[torch.Tensor] = None,
     cross_attention_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    if memory is not None:
-        x = layer_norm(params["layernorm"], x)
-
     k_v_states = memory if memory is not None else x
     mask = cross_attention_mask if memory is not None else attention_mask
 
@@ -60,11 +66,6 @@ def attention(
     out = out.transpose(0, 1).contiguous().view(seq_len, -1)
     out = torch.einsum("sd,dh->sh", out, params["output"])
 
-    out = out + x
-
-    if memory is None:
-        out = layer_norm(params["layernorm"], out)
-
     return out
 
 
@@ -81,17 +82,7 @@ def feed_forward(params: weights.Feed_Forward_Params, x: torch.Tensor) -> torch.
 
     h = torch.einsum("td,df->tf", h, params["output"])
 
-    h = layer_norm(params["layernorm"], h)
-
-    return x + h
-
-
-def layer_norm(
-    weight: torch.Tensor, x: torch.Tensor, eps: float = 1e-12
-) -> torch.Tensor:
-    mean = x.mean(-1, keepdim=True)
-    var = x.var(-1, keepdim=True, unbiased=False)
-    return weight * (x - mean) / torch.sqrt(var + eps)
+    return h
 
 
 def transformer_layer(
@@ -101,6 +92,11 @@ def transformer_layer(
     memory: Optional[torch.Tensor] = None,
     cross_attention_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    residual = h
+
+    if memory is not None:
+        h = layer_norm(params["ln_1"], h)
+
     h = attention(
         params["attention"],
         h,
@@ -109,7 +105,15 @@ def transformer_layer(
         cross_attention_mask=cross_attention_mask,
     )
 
+    h = h + residual
+
+    if memory is None:
+        h = layer_norm(params["ln_1"], h)
+
+    residual = h
     h = feed_forward(params["feed_forward"], h)
+    h = h + residual
+    h = layer_norm(params["ln_2"], h)
 
     return h
 
