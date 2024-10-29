@@ -8,6 +8,7 @@ import torch.func as func
 import torch.jit as jit
 import torch.nn.functional as F
 
+import checkpoint
 import config
 import data
 import model
@@ -24,6 +25,7 @@ GPT2_PATH = pathlib.Path("./weights/gpt2.bin")
 TRAIN_DATA_PATH = pathlib.Path("./data/jericho-world/train.json")
 LR = 3e-4
 PAD_TOKEN_ID = tokenizer.GPT2_TOKENIZER.pad_token_id
+CHECKPOINT_DIR = pathlib.Path("./checkpoints")
 
 
 def train(num_epochs: int = NUM_EPOCHS) -> None:
@@ -37,12 +39,20 @@ def train(num_epochs: int = NUM_EPOCHS) -> None:
     )
 
     # ** Model **
-    params = weights.init_worldformer(config.WORLDFORMER_CONFIG, BERT_PATH, GPT2_PATH)
+    initial_params = weights.init_worldformer(
+        config.WORLDFORMER_CONFIG, BERT_PATH, GPT2_PATH
+    )
+    initial_optimizer_state = optimizer.Adam_State()
 
     batched_predict = func.vmap(
         model.worldformer,
         in_dims=(None, *([0] * 8)),
         randomness="different",
+    )
+
+    # ** Checkpoint **
+    params, adam_state, start_epoch = checkpoint.resume_from_checkpoint(
+        CHECKPOINT_DIR, initial_params, initial_optimizer_state
     )
 
     # ** Loss **
@@ -51,11 +61,10 @@ def train(num_epochs: int = NUM_EPOCHS) -> None:
     )
 
     # ** Optimizer **
-    adam_state = optimizer.Adam_State()
     opt = functools.partial(optimizer.Adam, state=adam_state)
 
     # ** Training Loop **
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         start_time = time.time()
         step = None
 
@@ -87,6 +96,8 @@ def train(num_epochs: int = NUM_EPOCHS) -> None:
 
         epoch_time = time.time() - start_time
         avg_loss = total_loss / (step + 1)
+
+        checkpoint.save_checkpoint(CHECKPOINT_DIR, params, adam_state, epoch + 1)
 
         print(
             f"Epoch {epoch + 1}/{num_epochs} | Total Steps: {step + 1} | Time: {epoch_time:.2f}s | Avg. Loss: {avg_loss:.4f}"
