@@ -9,26 +9,10 @@ class BERT_Config(NamedTuple):
     vocab_size: int
 
 
-BERT_CONFIG = BERT_Config(
-    hidden_size=768,
-    num_hidden_layers=6,
-    num_attention_heads=6,
-    intermediate_size=3072,
-    vocab_size=30522,
-)
-
-
 class GPT2_Config(NamedTuple):
     num_hidden_layers: int
     num_attention_heads: int
     vocab_size: int
-
-
-GPT2_CONFIG = GPT2_Config(
-    num_hidden_layers=6,
-    num_attention_heads=6,
-    vocab_size=50257,
-)
 
 
 class Aggregator_Config(NamedTuple):
@@ -38,18 +22,34 @@ class Aggregator_Config(NamedTuple):
     intermediate_size: int
 
 
+class Worldformer_Config(NamedTuple):
+    encoder_config: BERT_Config
+    decoder_config: GPT2_Config
+    aggregator_config: Aggregator_Config
+
+
+BERT_CONFIG = BERT_Config(
+    hidden_size=768,
+    num_hidden_layers=6,
+    num_attention_heads=6,
+    intermediate_size=3072,
+    vocab_size=30522,
+)
+
+
+GPT2_CONFIG = GPT2_Config(
+    num_hidden_layers=6,
+    num_attention_heads=6,
+    vocab_size=50257,
+)
+
+
 AGGREGATOR_CONFIG = Aggregator_Config(
     hidden_size=768,
     num_hidden_layers=2,
     num_attention_heads=2,
     intermediate_size=4096,
 )
-
-
-class Worldformer_Config(NamedTuple):
-    encoder_config: BERT_Config
-    decoder_config: GPT2_Config
-    aggregator_config: Aggregator_Config
 
 
 WORLDFORMER_CONFIG = Worldformer_Config(

@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field
-from typing import Any, Callable, TypeVar
+from typing import Any
 
 import torch
+
+from util import nested_map
 
 
 def SGD(params: Any, grads: Any, lr: float) -> Any:
@@ -65,22 +67,3 @@ def Adam(
         return params
 
     return nested_map(f, (params, grads), state, lr, betas, eps)
-
-
-T = TypeVar("T")
-
-
-def nested_map(f: Callable[..., T], structure_args: tuple[Any, ...], *args: Any) -> T:
-    if isinstance(structure_args[0], torch.Tensor):
-        return f(*structure_args, *args)
-    elif isinstance(structure_args[0], dict):
-        keys = structure_args[0].keys()
-        return {
-            k: nested_map(f, tuple(s[k] for s in structure_args), *args) for k in keys
-        }
-    elif isinstance(structure_args[0], list):
-        return [
-            nested_map(f, tuple(s[i] for s in structure_args), *args)
-            for i in range(len(structure_args[0]))
-        ]
-    return structure_args[0]

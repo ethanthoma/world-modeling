@@ -1,5 +1,6 @@
 import functools
 import itertools
+import logging
 import pathlib
 import time
 
@@ -17,6 +18,7 @@ import preprocess
 import spinner
 import tokenizer
 import weights
+from util import parameter_count
 
 NUM_EPOCHS = 5
 BATCH_SIZE = 16
@@ -27,9 +29,13 @@ LR = 3e-4
 PAD_TOKEN_ID = tokenizer.GPT2_TOKENIZER.pad_token_id
 CHECKPOINT_DIR = pathlib.Path("./checkpoints")
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 def train(num_epochs: int = NUM_EPOCHS) -> None:
     # ** Dataset **
+    logger.info("Creating dataset pipeline...")
     raw_data = data.data(TRAIN_DATA_PATH)
 
     preprocessed_data = map(preprocess.preprocess, raw_data)
@@ -39,6 +45,7 @@ def train(num_epochs: int = NUM_EPOCHS) -> None:
     )
 
     # ** Model **
+    logger.info("Initializing model...")
     initial_params = weights.init_worldformer(
         config.WORLDFORMER_CONFIG, BERT_PATH, GPT2_PATH
     )
@@ -51,9 +58,11 @@ def train(num_epochs: int = NUM_EPOCHS) -> None:
     )
 
     # ** Checkpoint **
+    logger.info("Loading latest checkpoint...")
     params, adam_state, start_epoch = checkpoint.resume_from_checkpoint(
         CHECKPOINT_DIR, initial_params, initial_optimizer_state
     )
+    logger.info(f"Model has {parameter_count(params):_} parameters")
 
     # ** Loss **
     batched_loss_fn = lambda *args: torch.mean(
@@ -64,6 +73,7 @@ def train(num_epochs: int = NUM_EPOCHS) -> None:
     opt = functools.partial(optimizer.Adam, state=adam_state)
 
     # ** Training Loop **
+    logger.info("Starting training...")
     for epoch in range(start_epoch, num_epochs):
         start_time = time.time()
         step = None
@@ -99,7 +109,7 @@ def train(num_epochs: int = NUM_EPOCHS) -> None:
 
         checkpoint.save_checkpoint(CHECKPOINT_DIR, params, adam_state, epoch + 1)
 
-        print(
+        logger.info(
             f"Epoch {epoch + 1}/{num_epochs} | Total Steps: {step + 1} | Time: {epoch_time:.2f}s | Avg. Loss: {avg_loss:.4f}"
         )
 

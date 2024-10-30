@@ -6,7 +6,7 @@
 !flake.lock
 
 */__pycache__/*
-!src/
+!src/*.py
 !pyproject.toml
 !uv.lock
 !.python-version

@@ -29,24 +29,113 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pname = "world-modeling";
+        manifest = (pkgs.lib.importTOML ./pyproject.toml).project;
+        name = manifest.name;
+        version = manifest.version;
 
         workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./.; };
 
         overlay = workspace.mkPyprojectOverlay { sourcePreference = "wheel"; };
 
-        pyprojectOverrides = _final: _prev: { };
+        pyprojectOverrides =
+          final: prev:
+          let
+            cudaPackageOverrides =
+              pkgs.lib.genAttrs
+                (pkgs.lib.concatMap
+                  (pkg: [
+                    "nvidia-${pkg}-cu11"
+                    "nvidia-${pkg}-cu12"
+                  ])
+                  [
+                    "cublas"
+                    "cuda-cupti"
+                    "cuda-curand"
+                    "cuda-nvrtc"
+                    "cuda-runtime"
+                    "cudnn"
+                    "cufft"
+                    "curand"
+                    "cusolver"
+                    "cusparse"
+                    "nccl"
+                    "nvjitlink"
+                    "nvtx"
+                  ]
+                )
+                (
+                  name:
+                  prev.${name}.overrideAttrs (old: {
+                    autoPatchelfIgnoreMissingDeps = true;
+                    postFixup = ''
+                      rm -rf $out/${final.python.sitePackages}/nvidia/{__pycache__,__init__.py}
+                      ln -sfn $out/${final.python.sitePackages}/nvidia/*/lib/lib*.so* $out/lib
+                    '';
+                  })
+                );
+          in
+          {
+            nvidia-cusolver-cu12 = prev.nvidia-cusolver-cu12.overrideAttrs (attrs: {
+              propagatedBuildInputs = attrs.propagatedBuildInputs or [ ] ++ [
+                final.nvidia-cublas-cu12
+              ];
+            });
 
-        pkgs = nixpkgs.legacyPackages.${system}.appendOverlays [ self.overlays.default ];
+            nvidia-cusparse-cu12 = prev.nvidia-cusparse-cu12.overrideAttrs (attrs: {
+              propagatedBuildInputs = attrs.propagatedBuildInputs or [ ] ++ [
+                final.nvidia-cublas-cu12
+              ];
+            });
+
+            torch = prev.torch.overrideAttrs (old: {
+              autoPatchelfIgnoreMissingDeps = true;
+
+              propagatedBuildInputs = old.propagatedBuildInputs or [ ] ++ [
+                final.numpy
+                final.packaging
+              ];
+            });
+
+            calver = prev.calver.overrideAttrs (old: {
+              buildInputs = (old.buildInputs or [ ]) ++ [ prev.wheel ];
+            });
+
+            setuptools-scm = prev.setuptools-scm.overrideAttrs (old: {
+              buildInputs = (old.buildInputs or [ ]) ++ [ prev.wheel ];
+            });
+
+            trove-classifiers = prev.trove-classifiers.overrideAttrs (old: {
+              buildInputs = (old.buildInputs or [ ]) ++ [ prev.wheel ];
+            });
+
+            pluggy = prev.pluggy.overrideAttrs (old: {
+              buildInputs = (old.buildInputs or [ ]) ++ [ prev.wheel ];
+            });
+          }
+          // cudaPackageOverrides;
+
+        pkgs = import nixpkgs {
+          inherit system;
+          config.allowUnfree = true;
+          overlays = [ self.overlays.default ];
+        };
 
         python = pkgs.python312;
 
         pythonSet = (pkgs.callPackage pyproject-nix.build.packages { inherit python; }).overrideScope (
           pkgs.lib.composeExtensions overlay pyprojectOverrides
         );
+
+        venv = pythonSet.mkVirtualEnv "${name}-${version}-venv" { ${name} = [ ]; };
       in
       {
-        packages.default = pythonSet.mkVirtualEnv "${pname}-env" { ${pname} = [ ]; };
+        packages.default = pkgs.writeShellApplication {
+          inherit name;
+          runtimeInputs = [ venv ];
+          text = ''
+            exec ${venv}/bin/${name} "$@"
+          '';
+        };
 
         devShells.default =
           let
@@ -54,11 +143,11 @@
 
             editablePythonSet = pythonSet.overrideScope editableOverlay;
 
-            virtualenv = editablePythonSet.mkVirtualEnv "${pname}-dev-env" { ${pname} = [ ]; };
+            virtualenv = editablePythonSet.mkVirtualEnv "${name}-${version}-dev-venv" { ${name} = [ ]; };
           in
           pkgs.mkShell {
             packages = [
-              #virtualenv
+              virtualenv
               pkgs.uv
               pkgs.ruff
               #pkgs.pylyzer
