@@ -1,38 +1,38 @@
 import json
-from typing import Dict, Iterable, List, Optional, Tuple, TypedDict
+from typing import Iterable, Optional, TypedDict
 
 
-class LocationDict(TypedDict):
+class Location_Dict(TypedDict):
     name: str
     num: int
 
 
-class StateDict(TypedDict):
+class State_Dict(TypedDict):
     walkthrough_act: str
     walkthrough_diff: str
     obs: str
     loc_desc: str
     inv_desc: str
-    inv_objs: Dict[str, str]
-    inv_attrs: Dict[str, List[str]]
-    location: LocationDict
-    surrounding_objs: Dict[str, List[str]]
-    surrounding_attrs: Dict[str, List[str]]
-    graph: List[List[str]]  # List of [subject, relation, object] triples
-    valid_acts: Dict[str, str]
+    inv_objs: dict[str, str]
+    inv_attrs: dict[str, list[str]]
+    location: Location_Dict
+    surrounding_objs: dict[str, list[str]]
+    surrounding_attrs: dict[str, list[str]]
+    graph: list[list[str]]  # list of [subject, relation, object] triples
+    valid_acts: dict[str, str]
     score: int
 
 
-class JerichoSample(TypedDict):
+class Jericho_Sample(TypedDict):
     rom: str
-    state: StateDict
-    next_state: StateDict
-    graph_diff: List[List[str]]  # List of [subject, relation, object] triples
+    state: State_Dict
+    next_state: State_Dict
+    graph_diff: list[list[str]]  # list of [subject, relation, object] triples
     action: str
     reward: int
 
 
-def data(filepath: str, chunk_size: int = 4096) -> Iterable[JerichoSample]:
+def data(filepath: str, chunk_size: int = 4096) -> Iterable[Jericho_Sample]:
     """
     JSON streamer, loads in chunks until complete JSON is found
     """
@@ -54,10 +54,10 @@ def data(filepath: str, chunk_size: int = 4096) -> Iterable[JerichoSample]:
                 buffer += chunk
 
 
-REQUIRED_KEYS = {k for k in JerichoSample.__annotations__}
+REQUIRED_KEYS = {k for k in Jericho_Sample.__annotations__}
 
 
-def find_complete_json(buffer: str) -> Tuple[Optional[str], str]:
+def find_complete_json(buffer: str) -> tuple[Optional[str], str]:
     bracket_stack = []
     in_string = False
     current_key = None

@@ -1,5 +1,5 @@
 import itertools
-from typing import Iterable, NamedTuple, Set, Tuple
+from typing import Iterable, NamedTuple, Set
 
 import data
 
@@ -10,18 +10,18 @@ class Input(NamedTuple):
 
 
 class Target(NamedTuple):
-    valid_actions_next: Set[Tuple[str, str]]
-    graph_additions: Set[Tuple[str, str, str]]
+    valid_actions_next: Set[tuple[str, str]]
+    graph_additions: Set[tuple[str, str, str]]
 
 
-def preprocess(sample: data.JerichoSample) -> Tuple[Input, Target]:
+def preprocess(sample: data.Jericho_Sample) -> tuple[Input, Target]:
     input = input_from_sample(sample)
     target = target_from_sample(sample)
 
     return input, target
 
 
-def input_from_sample(sample: data.JerichoSample) -> Input:
+def input_from_sample(sample: data.Jericho_Sample) -> Input:
     textual_observations = sample["state"]["obs"]
     valid_actions = {(k, v) for k, v in sample["state"]["valid_acts"].items()}
     graph = {(s, r, o) for s, r, o in sample["state"]["graph"]}
@@ -39,7 +39,7 @@ def input_from_sample(sample: data.JerichoSample) -> Input:
     return Input(textual_encoding, graph_encoding)
 
 
-def target_from_sample(sample: data.JerichoSample) -> Target:
+def target_from_sample(sample: data.Jericho_Sample) -> Target:
     valid_actions_next = {(k, v) for k, v in sample["next_state"]["valid_acts"].items()}
 
     current_graph = {(s, r, o) for s, r, o in sample["state"]["graph"]}

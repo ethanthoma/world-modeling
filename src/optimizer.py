@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Tuple, TypeVar
+from typing import Any, Callable, TypeVar
 
 import torch
 
@@ -13,9 +13,9 @@ def SGD(params: Any, grads: Any, lr: float) -> Any:
 
 @dataclass
 class Adam_State:
-    exp_avgs: Dict[int, torch.Tensor] = field(default_factory=dict)
-    exp_avg_sqs: Dict[int, torch.Tensor] = field(default_factory=dict)
-    state_steps: Dict[int, torch.Tensor] = field(default_factory=dict)
+    exp_avgs: dict[int, torch.Tensor] = field(default_factory=dict)
+    exp_avg_sqs: dict[int, torch.Tensor] = field(default_factory=dict)
+    state_steps: dict[int, torch.Tensor] = field(default_factory=dict)
 
 
 def Adam(
@@ -23,7 +23,7 @@ def Adam(
     grads: Any,
     state: Adam_State,
     lr: float = 0.001,
-    betas: Tuple[float, float] = (0.9, 0.999),
+    betas: tuple[float, float] = (0.9, 0.999),
     eps: float = 1e-8,
 ) -> Any:
     def f(
@@ -31,7 +31,7 @@ def Adam(
         grads: torch.Tensor,
         state: Adam_State,
         lr: float,
-        beta: Tuple[float, float],
+        beta: tuple[float, float],
         eps: float,
     ):
         param_id = id(params)
@@ -70,7 +70,7 @@ def Adam(
 T = TypeVar("T")
 
 
-def nested_map(f: Callable[..., T], structure_args: Tuple[Any, ...], *args: Any) -> T:
+def nested_map(f: Callable[..., T], structure_args: tuple[Any, ...], *args: Any) -> T:
     if isinstance(structure_args[0], torch.Tensor):
         return f(*structure_args, *args)
     elif isinstance(structure_args[0], dict):

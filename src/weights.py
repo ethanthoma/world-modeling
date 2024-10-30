@@ -1,6 +1,6 @@
 import copy
 import pathlib
-from typing import Any, List, Tuple, TypedDict
+from typing import Any, TypedDict
 
 import torch
 import torch.nn.init as init
@@ -33,12 +33,12 @@ class Layer_Params(TypedDict):
 class Transformer_Params(TypedDict):
     embeddings: torch.Tensor
     layernorm: torch.Tensor
-    layers: List[Layer_Params]
+    layers: list[Layer_Params]
 
 
 class Aggregator_Params(TypedDict):
     layernorm: torch.Tensor
-    layers: List[Layer_Params]
+    layers: list[Layer_Params]
 
 
 class Worldformer_Params(TypedDict):
@@ -63,7 +63,7 @@ def load_bert_weights(
         state_dict[f"{prefix}.embeddings.word_embeddings.weight"], new_tokens, std=0.02
     )
 
-    layers: List[Layer_Params] = []
+    layers: list[Layer_Params] = []
     for i in range(config.num_hidden_layers):
         base = f"{prefix}.encoder.layer.{i}"
 
@@ -111,7 +111,7 @@ def load_gpt2_weights(
         state_dict["wte.weight"], new_tokens, std=0.02
     )
 
-    layers: List[Layer_Params] = []
+    layers: list[Layer_Params] = []
     for i in range(config.num_hidden_layers):
         qkv_weights = state_dict[f"h.{i}.attn.c_attn.weight"]
         q, k, v = split_qkv_weights(qkv_weights)
@@ -168,7 +168,7 @@ def increase_embed_size(
 
 def split_qkv_weights(
     attn_weight: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dim1, dim2 = attn_weight.shape
     split_dim = 1 if dim1 < dim2 else 0
     hidden_size = min(attn_weight.shape)
@@ -184,7 +184,7 @@ def init_aggregator_weights(
         init.normal_(weight, mean=0.0, std=0.02)
         return weight
 
-    layers: List[Layer_Params] = []
+    layers: list[Layer_Params] = []
     for _ in range(config.num_hidden_layers):
         attention_params: Attention_Params = {
             "query": init_linear(config.hidden_size, config.hidden_size),

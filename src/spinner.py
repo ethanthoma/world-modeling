@@ -4,10 +4,10 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator, List, Optional
+from typing import Iterator, Optional
 
 RATE: float = 0.080
-FRAMES: List[str] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+FRAMES: list[str] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 
 class Shared_State:
@@ -33,9 +33,7 @@ def spinner_task(
     spinner_chars = itertools.cycle(FRAMES)
     while not stop_event.is_set():
         with lock:
-            sys.stdout.write("\r")
-            sys.stdout.write(" " * 80)
-            sys.stdout.write("\r")
+            sys.stdout.write("\r\033[K")
             sys.stdout.write(f"{next(spinner_chars)} {shared_state.current_text}")
             sys.stdout.flush()
         time.sleep(RATE)
@@ -86,9 +84,7 @@ def spinner():
     finally:
         stop_event.set()
         with lock:
-            sys.stdout.write("\r")
-            sys.stdout.write(" " * 80)
-            sys.stdout.write("\r")
+            sys.stdout.write("\r\033[K")
             sys.stdout.flush()
         thread.join(timeout=1.0)
         show_cursor()

@@ -1,6 +1,6 @@
 import pathlib
 import time
-from typing import NamedTuple, Optional, Tuple
+from typing import NamedTuple, Optional
 
 import torch
 
@@ -66,7 +66,7 @@ def resume_from_checkpoint(
     checkpoint_dir: pathlib.Path,
     default_params: weights.Worldformer_Params,
     default_optimizer_state: optimizer.Adam_State,
-) -> Tuple[weights.Worldformer_Params, optimizer.Adam_State, int]:
+) -> tuple[weights.Worldformer_Params, optimizer.Adam_State, int]:
     checkpoint = load_latest_checkpoint(checkpoint_dir)
 
     if checkpoint is None:

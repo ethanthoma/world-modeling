@@ -1,5 +1,5 @@
 import functools
-from typing import List, NamedTuple, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -191,7 +191,7 @@ def worldformer(
     graph_target_ids: torch.Tensor,
     action_target_attention_mask: torch.Tensor,
     graph_target_attention_mask: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     text_encoded = bert_model(
         params["text_encoder"],
         textual_input_ids,

@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import torch
 import transformers
 
@@ -38,11 +36,11 @@ GPT2_TOKENIZER = get_gpt2_tokenizer()
 
 
 def tokenize_input(
-    input: preprocess.Input,
+    input: tuple[preprocess.Input, ...],
     input_length: int = 1024,
     bert_tokenizer: transformers.BertTokenizer = BERT_TOKENIZER,
     device: torch.device = DEVICE,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Tokenizes input text and graph with BERT tokenizer"""
     textual_input, graph_input = zip(*input)
 
@@ -83,11 +81,11 @@ def tokenize_input(
 
 
 def tokenize_target(
-    target: preprocess.Target,
+    target: tuple[preprocess.Target, ...],
     input_length: int = 1024,
     gpt2_tokenizer: transformers.GPT2Tokenizer = GPT2_TOKENIZER,
     device: torch.device = DEVICE,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Tokenizes target actions and graph differences with GPT2 tokenizer"""
     action_target, graph_target = zip(*target)
 
@@ -133,7 +131,7 @@ def create_sequence_boundaries(
     bos_token_id: int = None,
     eos_token_id: int = None,
     device: torch.device = DEVICE,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Creates sequence boundaries and valid sequence mask for Set of Sequences
     Returns both sequence start positions and valid sequence mask
