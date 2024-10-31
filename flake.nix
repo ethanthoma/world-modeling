@@ -16,6 +16,11 @@
       inputs.pyproject-nix.follows = "pyproject-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -25,6 +30,7 @@
       flake-utils,
       pyproject-nix,
       uv2nix,
+      rust-overlay,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -150,7 +156,7 @@
               virtualenv
               pkgs.uv
               pkgs.ruff
-              #pkgs.pylyzer
+              pkgs.pylyzer
             ];
             shellHook = ''
               unset PYTHONPATH
@@ -163,38 +169,47 @@
     )
     // {
       overlays.default = final: prev: {
+        inherit (rust-overlay.overlays.default final prev) rust-bin;
+
         ruff = prev.ruff.overrideAttrs (oldAttrs: {
           makeWrapperArgs = (oldAttrs.makeWrapperArgs or [ ]) ++ [
             "--suffix PATH : ${prev.lib.makeBinPath [ prev.ruff ]}"
           ];
         });
 
-        pylyzer = prev.pylyzer.override {
-          rustPlatform = final.rustPlatform // {
-            buildRustPackage =
-              args:
-              final.rustPlatform.buildRustPackage (
-                args
-                // rec {
-                  version = "0.0.68";
+        pylyzer =
+          let
+            rustPlatform = prev.makeRustPlatform {
+              cargo = final.rust-bin.stable.latest.default;
+              rustc = final.rust-bin.stable.latest.default;
+            };
+          in
+          prev.pylyzer.override {
+            rustPlatform = rustPlatform // {
+              buildRustPackage =
+                args:
+                rustPlatform.buildRustPackage (
+                  args
+                  // rec {
+                    version = "0.0.68";
 
-                  src = prev.fetchFromGitHub {
-                    owner = "mtshiba";
-                    repo = "pylyzer";
-                    rev = "refs/tags/v${version}";
-                    hash = "sha256-xeQDyj18L9jCftne9S79kWjrW0K7Nkx86Cy2aFqePfA=";
-                  };
-
-                  cargoLock = {
-                    lockFile = "${src}/Cargo.lock";
-                    outputHashes = {
-                      "rustpython-ast-0.4.0" = "sha256-kMUuqOVFSvvSHOeiYMjWdsLnDu12RyQld3qtTyd5tAM=";
+                    src = prev.fetchFromGitHub {
+                      owner = "mtshiba";
+                      repo = "pylyzer";
+                      rev = "refs/tags/v${version}";
+                      hash = "sha256-xeQDyj18L9jCftne9S79kWjrW0K7Nkx86Cy2aFqePfA=";
                     };
-                  };
-                }
-              );
+
+                    cargoLock = {
+                      lockFile = "${src}/Cargo.lock";
+                      outputHashes = {
+                        "rustpython-ast-0.4.0" = "sha256-kMUuqOVFSvvSHOeiYMjWdsLnDu12RyQld3qtTyd5tAM=";
+                      };
+                    };
+                  }
+                );
+            };
           };
-        };
       };
     };
 }

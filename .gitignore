@@ -1,11 +1,13 @@
-/*
+*
+
 !.gitignore
-!*.md
+!README.md
 
 !flake.nix
 !flake.lock
 
 */__pycache__/*
+!src/
 !src/*.py
 !pyproject.toml
 !uv.lock
