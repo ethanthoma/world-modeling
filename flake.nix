@@ -156,7 +156,7 @@
               virtualenv
               pkgs.uv
               pkgs.ruff
-              pkgs.pylyzer
+              #pkgs.pylyzer
             ];
             shellHook = ''
               unset PYTHONPATH

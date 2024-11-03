@@ -1,121 +1,220 @@
+import dataclasses
 import functools
+import gc
 import itertools
-import logging
 import pathlib
 import time
+from typing import Any, Callable, TypedDict
 
 import torch
 import torch.func as func
-import torch.jit as jit
 import torch.nn.functional as F
 
-import checkpoint
 import config
-import data
+import input_pipeline
 import model
 import optimizer
-import preprocess
 import spinner
-import tokenizer
+import util
 import weights
-from util import parameter_count
 
 NUM_EPOCHS = 5
-BATCH_SIZE = 16
+BATCH_SIZE = 1
+LR = 3e-4
 BERT_PATH = pathlib.Path("./weights/bert.bin")
 GPT2_PATH = pathlib.Path("./weights/gpt2.bin")
 TRAIN_DATA_PATH = pathlib.Path("./data/jericho-world/train.json")
-LR = 3e-4
-PAD_TOKEN_ID = tokenizer.GPT2_TOKENIZER.pad_token_id
 CHECKPOINT_DIR = pathlib.Path("./checkpoints")
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def train(num_epochs: int = NUM_EPOCHS) -> None:
-    # ** Dataset **
-    logger.info("Creating dataset pipeline...")
-    raw_data = data.data(TRAIN_DATA_PATH)
+class Train_Config(TypedDict):
+    num_epochs: int
+    batch_size: int
+    learning_rate: float
+    grad_clip_max: float
+    bert_config: config.BERT_Config
+    gpt2_config: config.GPT2_Config
+    worldformer_config: config.Worldformer_Config
+    pad_token_id: int
+    bert_path: pathlib.Path
+    gpt2_path: pathlib.Path
+    data_path: pathlib.Path
+    checkpoint_dir: pathlib.Path
+    device: str
 
-    preprocessed_data = map(preprocess.preprocess, raw_data)
 
-    batched_data = itertools.starmap(
-        zip, itertools.batched(preprocessed_data, BATCH_SIZE)
-    )
+@dataclasses.dataclass
+class Train_State:
+    apply_fn: Callable[
+        [weights.Worldformer_Params, torch.Tensor, ...],
+        tuple[torch.Tensor, torch.Tensor],
+    ]
+    params: weights.Worldformer_Params
+    opt: Callable[
+        [weights.Worldformer_Params, Any, optimizer.Adam_State, ...],
+        weights.Worldformer_Params,
+    ]
+    opt_state: optimizer.Adam_State
+    step: int = 0
+
+    def apply_gradients(self, grads: Any):
+        return dataclasses.replace(
+            self,
+            params=self.opt(params=self.params, grads=grads, opt_state=self.opt_state),
+            step=self.step + 1,
+        )
+
+    def save_checkpoint(self, checkpoint_dir: pathlib.Path, epoch: int):
+        torch.save(
+            {
+                "params": self.params,
+                "opt_state": self.opt_state,
+                "step": self.step,
+                "epoch": epoch,
+            },
+            checkpoint_dir / f"checkpoint_epoch_{epoch}.pt",
+        )
+
+
+def loss_fn(
+    params: weights.Worldformer_Params,
+    x: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    y: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    apply_fn: Callable[
+        [weights.Worldformer_Params, torch.Tensor, ...],
+        tuple[torch.Tensor, torch.Tensor],
+    ],
+    pad_token_id: int,
+    device: torch.device,
+):
+    with torch.autocast(device_type=device):
+        action_logits, graph_logits = apply_fn(params, *x, *y)
+
+        (
+            action_targets,
+            graph_targets,
+            action_boundaries,
+            graph_boundaries,
+        ) = y
+
+        batched_sos_loss = func.vmap(sos_loss, in_dims=(*([0] * 3), None))
+
+        action_loss = batched_sos_loss(
+            action_logits,
+            action_targets,
+            action_boundaries,
+            pad_token_id,
+        )
+
+        graph_loss = batched_sos_loss(
+            graph_logits,
+            graph_targets,
+            graph_boundaries,
+            pad_token_id,
+        )
+
+        return torch.mean(action_loss + graph_loss)
+
+
+def train(train_config: Train_Config) -> None:
+    print("Training...")
 
     # ** Model **
-    logger.info("Initializing model...")
-    initial_params = weights.init_worldformer(
-        config.WORLDFORMER_CONFIG, BERT_PATH, GPT2_PATH
+    params = weights.init_worldformer(
+        train_config["worldformer_config"],
+        train_config["bert_path"],
+        train_config["gpt2_path"],
     )
-    initial_optimizer_state = optimizer.Adam_State()
+    params = util.nested_map(
+        lambda t: t.requires_grad_() if t.is_floating_point else t, params
+    )
 
-    batched_predict = func.vmap(
+    print(f"Model has {util.parameter_count(params):_} parameters")
+
+    apply_fn = func.vmap(
         model.worldformer,
         in_dims=(None, *([0] * 8)),
         randomness="different",
     )
 
-    # ** Checkpoint **
-    logger.info("Loading latest checkpoint...")
-    params, adam_state, start_epoch = checkpoint.resume_from_checkpoint(
-        CHECKPOINT_DIR, initial_params, initial_optimizer_state
-    )
-    logger.info(f"Model has {parameter_count(params):_} parameters")
-
-    # ** Loss **
-    batched_loss_fn = lambda *args: torch.mean(
-        func.vmap(loss_fn, in_dims=(None, *([0] * 6), None))(*args)
-    )
-
     # ** Optimizer **
-    opt = functools.partial(optimizer.Adam, state=adam_state)
+    opt_state = optimizer.Adam_State()
+    opt = functools.partial(optimizer.Adam, lr=train_config["learning_rate"])
 
     # ** Training Loop **
-    logger.info("Starting training...")
-    for epoch in range(start_epoch, num_epochs):
-        start_time = time.time()
-        step = None
+    state = Train_State(
+        apply_fn=apply_fn,
+        params=params,
+        opt=opt,
+        opt_state=opt_state,
+    )
 
-        total_loss = 0
+    time_fmt = lambda t: time.strftime("%H:%M:%S", time.gmtime(t))
+    scaler = torch.amp.GradScaler(train_config["device"])
+    grad_clip_norm_ = functools.partial(
+        lambda grad, scaler: util.nested_map(
+            lambda t: (t * (1 / scaler.get_scale())).clamp_(max=1.0)
+            * scaler.get_scale(),
+            grad,
+        ),
+        scaler=scaler,
+    )
 
-        with spinner.spinner() as w:
-            w.write(f"Epoch: {epoch + 1}/{num_epochs} | Step: 0")
+    scaled_loss_fn = lambda *args: scaler.scale(loss_fn(*args))
 
-            for step, (input, target) in enumerate(batched_data):
-                tokens_input = tokenizer.tokenize_input(input)
-                tokens_target = tokenizer.tokenize_target(target)
+    print("Starting training loop...")
+    for epoch in range(train_config["num_epochs"]):
+        start_time, state.step, total_loss = time.time(), 0, 0
 
-                logits = batched_predict(params, *tokens_input, *tokens_target)
+        with spinner.spinner():
+            print(f"Epoch: {epoch + 1}/{train_config["num_epochs"]} | Step: 1...")
 
-                grads, loss = func.grad_and_value(batched_loss_fn, argnums=0)(
-                    params, *tokens_target, *logits, PAD_TOKEN_ID
+            for x, y in input_pipeline.input_pipeline(
+                data_path=train_config["data_path"],
+                batch_size=train_config["batch_size"],
+                bert_config=train_config["bert_config"],
+                gpt2_config=train_config["gpt2_config"],
+            ):
+                step_time = time.time()
+
+                grads, loss = func.grad_and_value(scaled_loss_fn, argnums=(0))(
+                    state.params,
+                    x,
+                    y,
+                    state.apply_fn,
+                    train_config["pad_token_id"],
+                    train_config["device"],
                 )
 
-                params = opt(params=params, grads=grads, lr=LR)
+                total_loss += loss * (1 / scaler.get_scale())
 
-                # ** Stats **
-                elapsed_time = time.time() - start_time
-                avg_step_time = elapsed_time / (step + 1)
-                total_loss += loss
+                grad_clip_norm_(grads)
 
-                w.write(
-                    f"Epoch: {epoch + 1}/{num_epochs} | Step: {step + 1} | Avg. Step Time {avg_step_time:.2f}s | Loss: {loss:.4f}"
+                state = state.apply_gradients(grads=grads)
+
+                del grads, loss
+                gc.collect()
+
+                print(
+                    f"Epoch: {epoch + 1}/{train_config["num_epochs"]} | "
+                    f"Step: {state.step} | "
+                    f"Time: [{time_fmt(time.time() - step_time)}:{time_fmt(time.time() - start_time)}] | "
+                    f"Avg. Loss: [{(total_loss / state.step):.4f}]"
                 )
 
-        epoch_time = time.time() - start_time
-        avg_loss = total_loss / (step + 1)
-
-        checkpoint.save_checkpoint(CHECKPOINT_DIR, params, adam_state, epoch + 1)
-
-        logger.info(
-            f"Epoch {epoch + 1}/{num_epochs} | Total Steps: {step + 1} | Time: {epoch_time:.2f}s | Avg. Loss: {avg_loss:.4f}"
+        print(
+            f"Epoch {epoch + 1}/{train_config["num_epochs"]} | "
+            f"Total Steps: {state.step} | "
+            f"Time: [{time_fmt(time.time() - start_time)}] | "
+            f"Avg. Loss: {(total_loss / (state.step)):.4f}"
         )
 
+        state.save_checkpoint(train_config["checkpoint_dir"], epoch + 1)
+        print(f"Stored checkpoint to {train_config["checkpoint_dir"]}")
 
-@jit.script
-def compute_sos_loss(
+
+def sos_loss(
     logits: torch.Tensor,
     target_ids: torch.Tensor,
     boundaries: torch.Tensor,
@@ -142,31 +241,3 @@ def compute_sos_loss(
     sequence_loss = masked_losses.sum(dim=0, keepdim=True) / sequence_lengths
 
     return sequence_loss.squeeze()
-
-
-@jit.script
-def loss_fn(
-    params: weights.Worldformer_Params,
-    action_targets: torch.Tensor,
-    graph_targets: torch.Tensor,
-    action_boundaries: torch.Tensor,
-    graph_boundaries: torch.Tensor,
-    action_logits: torch.Tensor,
-    graph_logits: torch.Tensor,
-    pad_token_id: int,
-) -> torch.Tensor:
-    action_loss = compute_sos_loss(
-        action_logits,
-        action_targets,
-        action_boundaries,
-        pad_token_id,
-    )
-
-    graph_loss = compute_sos_loss(
-        graph_logits,
-        graph_targets,
-        graph_boundaries,
-        pad_token_id,
-    )
-
-    return action_loss + graph_loss

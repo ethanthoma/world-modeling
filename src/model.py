@@ -8,13 +8,12 @@ import alibi
 import weights
 
 
-@torch.jit.script
 def layer_norm(
-    weight: torch.Tensor, x: torch.Tensor, eps: float = 1e-12
+    params: weights.Layer_Norm_Params, x: torch.Tensor, eps: float = 1e-12
 ) -> torch.Tensor:
     mean = x.mean(-1, keepdim=True)
     var = x.var(-1, keepdim=True, unbiased=False)
-    return weight * (x - mean) / torch.sqrt(var + eps)
+    return (params["weight"] * (x - mean) / torch.sqrt(var + eps)) + params["bias"]
 
 
 def attention(
@@ -34,15 +33,16 @@ def attention(
     q_head_dim = params["query"].shape[0] // num_attention_heads
     kv_head_dim = params["key"].shape[0] // num_attention_heads
 
-    q = torch.einsum("sd,dh->sh", x, params["query"])
-    k = torch.einsum("sd,dh->sh", k_v_states, params["key"])
-    v = torch.einsum("sd,dh->sh", k_v_states, params["value"])
+    q = F.linear(x, params["query"], params["query_bias"])
+    k = F.linear(k_v_states, params["key"], params["key_bias"])
+    v = F.linear(k_v_states, params["value"], params["value_bias"])
 
     q = q.view(seq_len, num_attention_heads, q_head_dim).transpose(0, 1)
     k = k.view(kv_seq_len, num_attention_heads, kv_head_dim).transpose(0, 1)
     v = v.view(kv_seq_len, num_attention_heads, kv_head_dim).transpose(0, 1)
 
-    scores = torch.einsum("nqd,nkd->nqk", q, k) / (q_head_dim**0.5)
+    q = q / (q_head_dim**0.5)
+    scores = torch.matmul(q, k.transpose(-2, -1))
 
     if memory is None:
         bias = alibi.build_alibi_bias(num_attention_heads, seq_len, x.device)[
@@ -56,15 +56,13 @@ def attention(
         else:
             mask = mask.unsqueeze(0).expand(seq_len, -1)
 
-        scores = scores.masked_fill(
-            mask == 0, -0.7 * float(torch.finfo(scores.dtype).max)
-        )
+        scores = scores.masked_fill(mask == 0, -0.7 * torch.finfo(scores.dtype).max)
 
-    attn = torch.softmax(scores, dim=-1)
+    attn = F.softmax(scores, dim=-1, dtype=v.dtype)
 
-    out = torch.einsum("hqk,nkd->nqd", attn, v)
+    out = torch.matmul(attn, v)
     out = out.transpose(0, 1).contiguous().view(seq_len, -1)
-    out = torch.einsum("sd,dh->sh", out, params["output"])
+    out = torch.matmul(out, params["output"])
 
     return out
 
@@ -72,15 +70,15 @@ def attention(
 def feed_forward(params: weights.Feed_Forward_Params, x: torch.Tensor) -> torch.Tensor:
     gated = params["intermediate"].shape[-1] != params["output"].shape[0]
 
-    h = torch.einsum("td,df->tf", x, params["intermediate"])
+    h = torch.matmul(x, params["intermediate"])
 
     if gated:
         h_gated, h_ungated = h.chunk(2, dim=1)
-        h = F.gelu(h_gated) * h_ungated
+        h = F.gelu(h_gated, approximate="tanh") * h_ungated
     else:
-        h = F.gelu(h)
+        h = F.gelu(h, approximate="tanh")
 
-    h = torch.einsum("td,df->tf", h, params["output"])
+    h = torch.matmul(h, params["output"])
 
     return h
 
@@ -128,7 +126,7 @@ def bert_model(
     for layer in params["layers"]:
         h = transformer_layer(layer, h, attention_mask=attention_mask)
 
-    h = layer_norm(params["layernorm"], h)
+    h = layer_norm(params["ln"], h)
 
     return h
 
@@ -140,7 +138,7 @@ def aggregate_encodings(
 ) -> torch.Tensor:
     combined = torch.cat([text_hidden, graph_hidden], dim=0)
 
-    h = layer_norm(params["layernorm"], combined)
+    h = layer_norm(params["ln"], combined)
 
     for layer in params["layers"]:
         h = transformer_layer(layer, h)
@@ -174,7 +172,7 @@ def gpt2(
             cross_attention_mask=encoder_attention_mask,
         )
 
-    h = layer_norm(params["layernorm"], h)
+    h = layer_norm(params["ln"], h)
 
     logits = torch.einsum("sd,vd->sv", h, params["embeddings"])
 
