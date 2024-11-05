@@ -191,19 +191,20 @@
                 rustPlatform.buildRustPackage (
                   args
                   // rec {
-                    version = "0.0.68";
+                    version = "0.0.69";
 
                     src = prev.fetchFromGitHub {
                       owner = "mtshiba";
                       repo = "pylyzer";
                       rev = "refs/tags/v${version}";
-                      hash = "sha256-xeQDyj18L9jCftne9S79kWjrW0K7Nkx86Cy2aFqePfA=";
+                      #rev = "main";
+                      hash = "sha256-3Ufige1OQWriJ6qQXjpfzL1tlA/9Sa8BEmhMDdpYlAQ=";
                     };
 
                     cargoLock = {
                       lockFile = "${src}/Cargo.lock";
                       outputHashes = {
-                        "rustpython-ast-0.4.0" = "sha256-kMUuqOVFSvvSHOeiYMjWdsLnDu12RyQld3qtTyd5tAM=";
+                        "rustpython-ast-0.4.0" = "sha256-RChZlXzdzyLp0Lb/LTLbWfbUzPDhmWkf0uVobflCKRk=";
                       };
                     };
                   }

@@ -4,7 +4,7 @@ import gc
 import itertools
 import pathlib
 import time
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable, Optional, TypedDict
 
 import torch
 import torch.func as func
@@ -18,18 +18,8 @@ import spinner
 import util
 import weights
 
-NUM_EPOCHS = 5
-BATCH_SIZE = 1
-LR = 3e-4
-BERT_PATH = pathlib.Path("./weights/bert.bin")
-GPT2_PATH = pathlib.Path("./weights/gpt2.bin")
-TRAIN_DATA_PATH = pathlib.Path("./data/jericho-world/train.json")
-CHECKPOINT_DIR = pathlib.Path("./checkpoints")
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
 
 class Train_Config(TypedDict):
-    num_epochs: int
     batch_size: int
     learning_rate: float
     grad_clip_max: float
@@ -42,6 +32,38 @@ class Train_Config(TypedDict):
     data_path: pathlib.Path
     checkpoint_dir: pathlib.Path
     device: str
+
+
+@dataclasses.dataclass
+class Early_Stopping:
+    best_loss: Optional[float] = None
+    time_at_best_loss: float = time.time()
+    epochs_since_best_loss: int = 0
+    epoch_limit: int = 5
+    time_limit: float = 5 * 24 * 60 * 60
+    min_delta: float = 0.01
+    early_stop: bool = False
+
+    def __call__(self, val_loss: Optional[float] = None) -> bool:
+        def check_time() -> bool:
+            return time.time() - self.time_at_best_loss >= self.time_limit
+
+        if self.best_loss is None or val_loss + self.min_delta < self.best_loss:
+            print("best loss is none or worse")
+            self.best_loss = val_loss
+            self.epochs_since_best_loss = 0
+            self.time_at_best_loss = time.time()
+        elif val_loss is None:
+            print("val loss is none")
+            self.early_stop |= check_time()
+        else:
+            print("best loss is better")
+            self.epochs_since_best_loss += 1
+
+            if self.epochs_since_best_loss >= self.epoch_limit or check_time():
+                self.early_stop |= True
+
+        return self.early_stop
 
 
 @dataclasses.dataclass
@@ -73,7 +95,7 @@ class Train_State:
                 "step": self.step,
                 "epoch": epoch,
             },
-            checkpoint_dir / f"checkpoint_epoch_{epoch}.pt",
+            checkpoint_dir / f"checkpoint_epoch_{epoch}_{step}.pt",
         )
 
 
@@ -88,7 +110,7 @@ def loss_fn(
     pad_token_id: int,
     device: torch.device,
 ):
-    with torch.autocast(device_type=device):
+    with torch.autocast(device_type=device, dtype=torch.float32):
         action_logits, graph_logits = apply_fn(params, *x, *y)
 
         (
@@ -149,7 +171,9 @@ def train(train_config: Train_Config) -> None:
         opt=opt,
         opt_state=opt_state,
     )
+    early_stopping = Early_Stopping()
 
+    # ** Training Helpers **
     time_fmt = lambda t: time.strftime("%H:%M:%S", time.gmtime(t))
     scaler = torch.amp.GradScaler(train_config["device"])
     grad_clip_norm_ = functools.partial(
@@ -163,19 +187,22 @@ def train(train_config: Train_Config) -> None:
 
     scaled_loss_fn = lambda *args: scaler.scale(loss_fn(*args))
 
+    # ** Dataset **
+    train_set, valid_set = input_pipeline.input_pipeline(
+        data_path=train_config["data_path"],
+        batch_size=train_config["batch_size"],
+        bert_config=train_config["bert_config"],
+        gpt2_config=train_config["gpt2_config"],
+    )
+
     print("Starting training loop...")
-    for epoch in range(train_config["num_epochs"]):
+    for epoch in itertools.count():
         start_time, state.step, total_loss = time.time(), 0, 0
 
         with spinner.spinner():
-            print(f"Epoch: {epoch + 1}/{train_config["num_epochs"]} | Step: 1...")
+            print(f"Epoch: {epoch + 1} | Step: 1...")
 
-            for x, y in input_pipeline.input_pipeline(
-                data_path=train_config["data_path"],
-                batch_size=train_config["batch_size"],
-                bert_config=train_config["bert_config"],
-                gpt2_config=train_config["gpt2_config"],
-            ):
+            for x, y in train_set():
                 step_time = time.time()
 
                 grads, loss = func.grad_and_value(scaled_loss_fn, argnums=(0))(
@@ -197,21 +224,37 @@ def train(train_config: Train_Config) -> None:
                 gc.collect()
 
                 print(
-                    f"Epoch: {epoch + 1}/{train_config["num_epochs"]} | "
+                    f"Epoch: {epoch + 1} | "
                     f"Step: {state.step} | "
                     f"Time: [{time_fmt(time.time() - step_time)}:{time_fmt(time.time() - start_time)}] | "
                     f"Avg. Loss: [{(total_loss / state.step):.4f}]"
                 )
 
+                if early_stopping():
+                    print("Timed out.  Stopping...")
+                    state.save_checkpoint(train_config["checkpoint_dir"], epoch + 1)
+                    print(f"Stored checkpoint to {train_config["checkpoint_dir"]}")
+                    return
+
+        with spinner.spinner():
+            print(f"Epoch: {epoch + 1} | Validating...")
+
+            val_loss = validate(train_config, state, valid_set)
+
         print(
-            f"Epoch {epoch + 1}/{train_config["num_epochs"]} | "
-            f"Total Steps: {state.step} | "
+            f"Epoch {epoch + 1} | "
+            f"Step: {state.step} | "
             f"Time: [{time_fmt(time.time() - start_time)}] | "
-            f"Avg. Loss: {(total_loss / (state.step)):.4f}"
+            f"Avg. Loss: {(total_loss / (state.step)):.4f} | "
+            f"Validation Score {val_loss:.4f}"
         )
 
         state.save_checkpoint(train_config["checkpoint_dir"], epoch + 1)
         print(f"Stored checkpoint to {train_config["checkpoint_dir"]}")
+
+        if early_stopping(val_loss):
+            print("Validation loss or timed out.  Stopping...")
+            return
 
 
 def sos_loss(
@@ -241,3 +284,22 @@ def sos_loss(
     sequence_loss = masked_losses.sum(dim=0, keepdim=True) / sequence_lengths
 
     return sequence_loss.squeeze()
+
+
+def validate(train_config: Train_Config, state: Train_State, valid_set):
+    total_loss = 0
+    total_steps = 0
+
+    for x, y in valid_set():
+        loss = loss_fn(
+            state.params,
+            x,
+            y,
+            state.apply_fn,
+            train_config["pad_token_id"],
+            train_config["device"],
+        )
+        total_loss += loss
+        total_steps += 1
+
+    return total_loss / total_steps

@@ -86,6 +86,7 @@ def feed_forward(params: weights.Feed_Forward_Params, x: torch.Tensor) -> torch.
 def transformer_layer(
     params: weights.Layer_Params,
     h: torch.Tensor,
+    num_attention_heads: int = 6,
     attention_mask: Optional[torch.Tensor] = None,
     memory: Optional[torch.Tensor] = None,
     cross_attention_mask: Optional[torch.Tensor] = None,
@@ -98,6 +99,7 @@ def transformer_layer(
     h = attention(
         params["attention"],
         h,
+        num_attention_heads=num_attention_heads,
         memory=memory,
         attention_mask=attention_mask,
         cross_attention_mask=cross_attention_mask,
@@ -120,11 +122,17 @@ def bert_model(
     params: weights.Transformer_Params,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
+    num_attention_heads: int = 6,
 ) -> torch.Tensor:
     h = params["embeddings"][input_ids]
 
     for layer in params["layers"]:
-        h = transformer_layer(layer, h, attention_mask=attention_mask)
+        h = transformer_layer(
+            layer,
+            h,
+            num_attention_heads=num_attention_heads,
+            attention_mask=attention_mask,
+        )
 
     h = layer_norm(params["ln"], h)
 
@@ -135,13 +143,14 @@ def aggregate_encodings(
     params: weights.Aggregator_Params,
     text_hidden: torch.Tensor,
     graph_hidden: torch.Tensor,
+    num_attention_heads: int = 2,
 ) -> torch.Tensor:
     combined = torch.cat([text_hidden, graph_hidden], dim=0)
 
     h = layer_norm(params["ln"], combined)
 
     for layer in params["layers"]:
-        h = transformer_layer(layer, h)
+        h = transformer_layer(layer, h, num_attention_heads=num_attention_heads)
 
     return h
 
@@ -152,6 +161,7 @@ def gpt2(
     encoder_hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     encoder_attention_mask: Optional[torch.Tensor] = None,
+    num_attention_heads: int = 6,
 ) -> torch.Tensor:
     seq_length = input_ids.size(0)
     causal_mask = torch.triu(torch.ones(seq_length, seq_length), diagonal=1).bool()
@@ -167,6 +177,7 @@ def gpt2(
         h = transformer_layer(
             layer,
             h,
+            num_attention_heads=num_attention_heads,
             attention_mask=causal_mask,
             memory=encoder_hidden_states,
             cross_attention_mask=encoder_attention_mask,

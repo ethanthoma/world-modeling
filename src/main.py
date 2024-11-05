@@ -9,7 +9,6 @@ import train
 
 def main():
     train_config = train.Train_Config(
-        num_epochs=5,
         batch_size=1,
         learning_rate=3e-4,
         grad_clip_max=1.0,
