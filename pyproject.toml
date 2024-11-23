@@ -4,13 +4,20 @@ requires-python = ">=3.12"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-dependencies = ["numpy>=2.1.2", "torch>=2.5.0", "transformers>=4.45.2"]
+dependencies = [
+    "lightning>=2.4.0",
+    "numpy>=2.1.2",
+    "torch>=2.5.0",
+    "transformers>=4.45.2",
+]
 
 [project.scripts]
 world-modeling = "main:main"
 
 [tool.uv]
-dev-dependencies = []
+dev-dependencies = [
+    "rich>=13.9.4",
+]
 package = true
 
 [tool.ruff]

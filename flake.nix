@@ -191,14 +191,14 @@
                 rustPlatform.buildRustPackage (
                   args
                   // rec {
-                    version = "0.0.69";
+                    version = "0.0.70";
 
                     src = prev.fetchFromGitHub {
                       owner = "mtshiba";
                       repo = "pylyzer";
                       rev = "refs/tags/v${version}";
                       #rev = "main";
-                      hash = "sha256-3Ufige1OQWriJ6qQXjpfzL1tlA/9Sa8BEmhMDdpYlAQ=";
+                      hash = "sha256-jj9r5npClLY9mhDHFI92825RYvwn6m9KlngfFL0bqCw=";
                     };
 
                     cargoLock = {
